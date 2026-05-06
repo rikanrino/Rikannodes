@@ -592,7 +592,7 @@ class PromptRelayEncodeTimeline(io.ComfyNode):
         return io.Schema(
             node_id="PromptRelayEncodeTimeline",
             display_name="Prompt Relay Encode (Timeline)",
-            category="conditioning/prompt_relay",
+            category="Rikannodes",
             description=(
                 "Same as Prompt Relay Encode, but local prompts and segment lengths are edited "
                 "visually as draggable blocks on a timeline. The max_frames input only sets the "
@@ -659,7 +659,7 @@ class PromptRelayLoraGate(io.ComfyNode):
         return io.Schema(
             node_id="PromptRelayLoraGate",
             display_name="Prompt Relay LoRA Gate",
-            category="conditioning/prompt_relay",
+            category="Rikannodes",
             description=(
                 "Applies a LoRA with Gaussian temporal gating to one Prompt Relay segment. "
                 "Chain multiple gates — one per segment. Bypass unused gates. "
@@ -748,6 +748,114 @@ class PromptRelayLoraGate(io.ComfyNode):
 
         return io.NodeOutput(patched_model, patched_clip)
 
+class PromptRelayPowerLoraGate:
+    """Applies multiple LoRAs to various temporal segments natively."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                # segment_index global dihapus, dipindah ke masing-masing LoRA
+            },
+            "optional": {
+                "clip": ("CLIP", {"tooltip": "Optional CLIP model for global text patching."}),
+            },
+            "hidden": {},
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    RETURN_NAMES = ("model", "clip")
+    FUNCTION = "execute"
+    CATEGORY = "Rikannodes"
+
+    def execute(self, model, clip=None, **kwargs):
+        segments = model.model_options.get("pr_segments")
+        latent_frames = model.model_options.get("pr_latent_frames")
+        tokens_per_frame = model.model_options.get("pr_tokens_per_frame")
+
+        if segments is None:
+            log.warning("[PromptRelay PowerLoraGate] No Prompt Relay segment metadata on this model. Passing through.")
+            return (model, clip)
+
+        patched_model = model.clone()
+        patched_clip = clip
+
+        import comfy.utils
+        import comfy.sd
+
+        # 1. Parsing widget dinamis yang dikirim dari antarmuka JS
+        loras_to_load = {}
+        for k, v in kwargs.items():
+            parts = k.split("_")
+            if len(parts) < 2:
+                continue
+            
+            prefix = parts[0]
+            idx = parts[1]
+
+            if idx not in loras_to_load:
+                # Default value jika widget belum selesai termuat
+                loras_to_load[idx] = {"name": None, "segment": 0, "model_str": 1.0, "clip_str": 1.0}
+
+            if prefix == "lora" and isinstance(v, str):
+                loras_to_load[idx]["name"] = v
+            elif prefix == "segment":
+                loras_to_load[idx]["segment"] = int(v)
+            elif prefix == "modelStr":
+                loras_to_load[idx]["model_str"] = float(v)
+            elif prefix == "clipStr":
+                loras_to_load[idx]["clip_str"] = float(v)
+
+        # 2. Loop dan terapkan semua LoRA ke segmen masing-masing
+        for idx in sorted(loras_to_load.keys(), key=lambda x: int(x)):
+            data = loras_to_load[idx]
+            lora_name = data.get("name")
+            seg_idx = data.get("segment", 0)
+            strength_model = data.get("model_str", 1.0)
+            strength_clip = data.get("clip_str", 1.0)
+
+            if not lora_name or lora_name == "None":
+                continue
+
+            if strength_model == 0.0 and strength_clip == 0.0:
+                continue
+
+            # Cek apakah segment yang dipilih ada
+            if seg_idx >= len(segments):
+                log.warning(f"[PromptRelay PowerLoraGate] segment_index {seg_idx} is out of range. Skipping LoRA {lora_name}.")
+                continue
+
+            lora_path = folder_paths.get_full_path("loras", lora_name)
+            if not lora_path:
+                log.warning(f"[PromptRelay PowerLoraGate] LoRA file not found: {lora_name}")
+                continue
+
+            lora_file = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            segment = segments[seg_idx]
+
+            # Patch CLIP secara global (jika clip dihubungkan)
+            if patched_clip is not None and strength_clip != 0.0:
+                _, patched_clip = comfy.sd.load_lora_for_models(None, patched_clip, lora_file, 0.0, strength_clip)
+
+            # Patch UNet secara temporal ke segmen spesifik
+            if strength_model != 0.0:
+                _apply_gated_lora(
+                    patched_model,
+                    lora_file,
+                    segment,
+                    strength_model,
+                    tokens_per_frame,
+                    latent_frames,
+                )
+
+        # Teruskan metadata ke node selanjutnya dalam rantai
+        patched_model.model_options["pr_segments"] = segments
+        patched_model.model_options["pr_latent_frames"] = latent_frames
+        patched_model.model_options["pr_tokens_per_frame"] = tokens_per_frame
+
+        return (patched_model, patched_clip)
+
 
 # ==============================================================================
 # 6. MAPPINGS
@@ -756,9 +864,11 @@ class PromptRelayLoraGate(io.ComfyNode):
 NODE_CLASS_MAPPINGS = {
     "PromptRelayEncodeTimeline": PromptRelayEncodeTimeline,
     "PromptRelayLoraGate": PromptRelayLoraGate,
+    "PromptRelayPowerLoraGate": PromptRelayPowerLoraGate, 
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptRelayEncodeTimeline": "Prompt Relay Encode (Timeline)",
     "PromptRelayLoraGate": "Prompt Relay LoRA Gate",
+    "PromptRelayPowerLoraGate": "Prompt Relay Power Lora Gate",
 }

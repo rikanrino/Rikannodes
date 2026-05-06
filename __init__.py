@@ -1,5 +1,5 @@
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .nodes import PromptRelayEncodeTimeline, PromptRelayLoraGate
+from .nodes import PromptRelayEncodeTimeline, PromptRelayLoraGate, PromptRelayPowerLoraGate
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -9,7 +9,8 @@ class PromptRelay(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             PromptRelayEncodeTimeline,
-            PromptRelayLoraGate  # <--- Tambahkan di sini
+            PromptRelayLoraGate,
+            PromptRelayPowerLoraGate,
         ]
 
 
@@ -19,11 +20,13 @@ async def comfy_entrypoint() -> PromptRelay:
 NODE_CLASS_MAPPINGS = {
     "PromptRelayEncodeTimeline": PromptRelayEncodeTimeline,
     "PromptRelayLoraGate": PromptRelayLoraGate,
+    "PromptRelayPowerLoraGate": PromptRelayPowerLoraGate, 
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptRelayEncodeTimeline": "Prompt Relay Encode (Timeline)",
     "PromptRelayLoraGate": "Prompt Relay LoRA Gate",
+    "PromptRelayPowerLoraGate": "Prompt Relay Power Lora Gate",
 }
 
 
