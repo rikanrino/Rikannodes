@@ -3,7 +3,8 @@ import { app } from "../../scripts/app.js";
 app.registerExtension({
     name: "prompt_relay.PowerLoraGateNative",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "PromptRelayPowerLoraGate") {
+        // PERHATIKAN PERUBAHAN NAMA DI BAWAH INI
+        if (nodeData.name === "RikanPromptRelayPowerLoraGate") {
             
             const addLoraRow = function(node, index, loraName = "None") {
                 const getLoraList = () => {
@@ -14,15 +15,12 @@ app.registerExtension({
                     return ["None"];
                 };
 
-                // Tambahkan 5 widget LoRA
                 node.addWidget("toggle", `enable_${index}`, true, () => {});
                 node.addWidget("combo", `lora_${index}`, loraName, () => {}, { values: getLoraList() });
-                node.addWidget("number", `segment_${index}`, 0, () => {}, { min: 0, max: 99, step: 10, precision: 0 });
+                node.addWidget("number", `segment_${index}`, 1, () => {}, { min: 1, max: 100, step: 10, precision: 0 });
                 node.addWidget("number", `modelStr_${index}`, 1.0, () => {}, { min: -10.0, max: 10.0, step: 1, precision: 2 });
                 node.addWidget("number", `clipStr_${index}`, 1.0, () => {}, { min: -10.0, max: 10.0, step: 1, precision: 2 });
 
-                // TRIK PINDAH KE BAWAH: HANYA pindahkan tombol Add dan Remove.
-                // Toggle All dibiarkan agar tetap menetap di atas.
                 if (node.btnAddLora && node.btnRemoveLora) {
                     const idx2 = node.widgets.indexOf(node.btnAddLora);
                     if (idx2 !== -1) node.widgets.splice(idx2, 1);
@@ -30,7 +28,6 @@ app.registerExtension({
                     const idx3 = node.widgets.indexOf(node.btnRemoveLora);
                     if (idx3 !== -1) node.widgets.splice(idx3, 1);
 
-                    // Masukkan kembali agar otomatis berada di urutan terbawah
                     node.widgets.push(node.btnAddLora);
                     node.widgets.push(node.btnRemoveLora);
                 }
@@ -43,8 +40,6 @@ app.registerExtension({
                 this.serialize_widgets = true;
                 this.loraCount = 0;
 
-                // Simpan referensi tombol ke variabel spesifik (this.btn...)
-                // Karena ini dibuat pertama kali, posisinya akan permanen di atas
                 this.btnToggleAll = this.addWidget("button", "🔄 Toggle All", "toggle_all", () => {
                     let allOn = true;
                     for (const w of this.widgets) {
@@ -113,7 +108,7 @@ app.registerExtension({
                     for (let i = 0; i < info.widgets_values.length; i++) {
                         const v1 = info.widgets_values[i];
                         
-                        // Deteksi pola BARU (dengan toggle): Boolean, String, Number, Number, Number
+                        // Deteksi pola BARU
                         if (typeof v1 === "boolean" && 
                             typeof info.widgets_values[i+1] === "string" && 
                             typeof info.widgets_values[i+2] === "number" && 
@@ -129,14 +124,14 @@ app.registerExtension({
                             const wClip = this.widgets.find(w => w.name === `clipStr_${loraIndex}`);
 
                             if (wToggle) wToggle.value = v1; 
-                            if (wSegment) wSegment.value = info.widgets_values[i+2]; 
+                            if (wSegment) wSegment.value = Math.max(1, info.widgets_values[i+2]); 
                             if (wModel) wModel.value = info.widgets_values[i+3]; 
                             if (wClip) wClip.value = info.widgets_values[i+4]; 
                             
                             loraIndex++;
                             i += 4; 
                         }
-                        // Deteksi pola LAMA (tanpa toggle): String, Number, Number, Number
+                        // Deteksi pola LAMA
                         else if (typeof v1 === "string" && 
                                  typeof info.widgets_values[i+1] === "number" && 
                                  typeof info.widgets_values[i+2] === "number" && 
@@ -151,7 +146,7 @@ app.registerExtension({
                             const wClip = this.widgets.find(w => w.name === `clipStr_${loraIndex}`);
 
                             if (wToggle) wToggle.value = true;
-                            if (wSegment) wSegment.value = info.widgets_values[i+1]; 
+                            if (wSegment) wSegment.value = Math.max(1, info.widgets_values[i+1]); 
                             if (wModel) wModel.value = info.widgets_values[i+2]; 
                             if (wClip) wClip.value = info.widgets_values[i+3]; 
                             

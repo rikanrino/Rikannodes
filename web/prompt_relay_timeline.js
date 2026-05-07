@@ -894,7 +894,7 @@ app.registerExtension({
   name: "PromptRelay.Timeline",
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData?.name !== "PromptRelayEncodeTimeline") return;
+    if (nodeData?.name !== "RikanPromptRelayEncodeTimeline") return;
 
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
