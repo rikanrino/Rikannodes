@@ -5,7 +5,6 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "PromptRelayPowerLoraGate") {
             
-            // Fungsi pembantu untuk menambahkan satu set widget LoRA
             const addLoraRow = function(node, index, loraName = "None") {
                 const getLoraList = () => {
                     const loraLoader = LiteGraph.registered_node_types["LoraLoader"];
@@ -15,22 +14,55 @@ app.registerExtension({
                     return ["None"];
                 };
 
+                // Tambahkan 5 widget LoRA
+                node.addWidget("toggle", `enable_${index}`, true, () => {});
                 node.addWidget("combo", `lora_${index}`, loraName, () => {}, { values: getLoraList() });
                 node.addWidget("number", `segment_${index}`, 0, () => {}, { min: 0, max: 99, step: 10, precision: 0 });
                 node.addWidget("number", `modelStr_${index}`, 1.0, () => {}, { min: -10.0, max: 10.0, step: 1, precision: 2 });
                 node.addWidget("number", `clipStr_${index}`, 1.0, () => {}, { min: -10.0, max: 10.0, step: 1, precision: 2 });
+
+                // TRIK PINDAH KE BAWAH: HANYA pindahkan tombol Add dan Remove.
+                // Toggle All dibiarkan agar tetap menetap di atas.
+                if (node.btnAddLora && node.btnRemoveLora) {
+                    const idx2 = node.widgets.indexOf(node.btnAddLora);
+                    if (idx2 !== -1) node.widgets.splice(idx2, 1);
+                    
+                    const idx3 = node.widgets.indexOf(node.btnRemoveLora);
+                    if (idx3 !== -1) node.widgets.splice(idx3, 1);
+
+                    // Masukkan kembali agar otomatis berada di urutan terbawah
+                    node.widgets.push(node.btnAddLora);
+                    node.widgets.push(node.btnRemoveLora);
+                }
             };
 
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
                 
-                // Pastikan widget dinamis mendapatkan izin untuk disimpan ke memori
                 this.serialize_widgets = true;
                 this.loraCount = 0;
 
-                // Tombol: Tambah LoRA
-                this.addWidget("button", "➕ Add LoRA", "add_lora", (value, widget, node, pos, event) => {
+                // Simpan referensi tombol ke variabel spesifik (this.btn...)
+                // Karena ini dibuat pertama kali, posisinya akan permanen di atas
+                this.btnToggleAll = this.addWidget("button", "🔄 Toggle All", "toggle_all", () => {
+                    let allOn = true;
+                    for (const w of this.widgets) {
+                        if (w.name && w.name.startsWith("enable_") && w.value === false) {
+                            allOn = false;
+                            break;
+                        }
+                    }
+                    const targetState = !allOn;
+                    for (const w of this.widgets) {
+                        if (w.name && w.name.startsWith("enable_")) {
+                            w.value = targetState;
+                        }
+                    }
+                    this.setDirtyCanvas(true, true);
+                });
+
+                this.btnAddLora = this.addWidget("button", "➕ Add LoRA", "add_lora", (value, widget, node, pos, event) => {
                     const loraLoader = LiteGraph.registered_node_types["LoraLoader"];
                     let loras = ["None"];
                     if (loraLoader && loraLoader.nodeData && loraLoader.nodeData.input && loraLoader.nodeData.input.required && loraLoader.nodeData.input.required.lora_name) {
@@ -55,8 +87,7 @@ app.registerExtension({
                     new LiteGraph.ContextMenu(menuItems, { event: e, title: "Choose a lora" });
                 });
                 
-                // Tombol: Kurangi LoRA
-                this.addWidget("button", "➖ Remove Last LoRA", "remove_lora", () => {
+                this.btnRemoveLora = this.addWidget("button", "➖ Remove Last LoRA", "remove_lora", () => {
                     if (this.loraCount > 0) {
                         const suffix = `_${this.loraCount}`;
                         for (let i = this.widgets.length - 1; i >= 0; i--) {
@@ -73,39 +104,63 @@ app.registerExtension({
                 return r;
             };
 
-            // REVISI TOTAL: Pendekatan "Detektif Memori"
             const onConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onConfigure = function (info) {
                 if (info && info.widgets_values) {
                     this.loraCount = 0;
-                    
-                    // Kita pindai metadata widget_values untuk mendeteksi blok LoRA secara akurat.
-                    // Pola yang dicari: Teks (Nama), Angka (Segment), Angka (ModelStr), Angka (ClipStr)
                     let loraIndex = 1;
+                    
                     for (let i = 0; i < info.widgets_values.length; i++) {
                         const v1 = info.widgets_values[i];
-                        const v2 = info.widgets_values[i+1];
-                        const v3 = info.widgets_values[i+2];
-                        const v4 = info.widgets_values[i+3];
                         
-                        // Jika polanya cocok persis dengan widget kita
-                        if (typeof v1 === "string" && typeof v2 === "number" && typeof v3 === "number" && typeof v4 === "number") {
+                        // Deteksi pola BARU (dengan toggle): Boolean, String, Number, Number, Number
+                        if (typeof v1 === "boolean" && 
+                            typeof info.widgets_values[i+1] === "string" && 
+                            typeof info.widgets_values[i+2] === "number" && 
+                            typeof info.widgets_values[i+3] === "number" && 
+                            typeof info.widgets_values[i+4] === "number") {
+                            
+                            this.loraCount = loraIndex;
+                            addLoraRow(this, loraIndex, info.widgets_values[i+1]);
+                            
+                            const wToggle = this.widgets.find(w => w.name === `enable_${loraIndex}`);
+                            const wSegment = this.widgets.find(w => w.name === `segment_${loraIndex}`);
+                            const wModel = this.widgets.find(w => w.name === `modelStr_${loraIndex}`);
+                            const wClip = this.widgets.find(w => w.name === `clipStr_${loraIndex}`);
+
+                            if (wToggle) wToggle.value = v1; 
+                            if (wSegment) wSegment.value = info.widgets_values[i+2]; 
+                            if (wModel) wModel.value = info.widgets_values[i+3]; 
+                            if (wClip) wClip.value = info.widgets_values[i+4]; 
+                            
+                            loraIndex++;
+                            i += 4; 
+                        }
+                        // Deteksi pola LAMA (tanpa toggle): String, Number, Number, Number
+                        else if (typeof v1 === "string" && 
+                                 typeof info.widgets_values[i+1] === "number" && 
+                                 typeof info.widgets_values[i+2] === "number" && 
+                                 typeof info.widgets_values[i+3] === "number") {
+                            
                             this.loraCount = loraIndex;
                             addLoraRow(this, loraIndex, v1);
                             
-                            // Suntikkan nilai ke widget yang baru saja dibuat
-                            const len = this.widgets.length;
-                            this.widgets[len - 3].value = v2; // Isi nilai segment
-                            this.widgets[len - 2].value = v3; // Isi nilai modelStr
-                            this.widgets[len - 1].value = v4; // Isi nilai clipStr
+                            const wToggle = this.widgets.find(w => w.name === `enable_${loraIndex}`);
+                            const wSegment = this.widgets.find(w => w.name === `segment_${loraIndex}`);
+                            const wModel = this.widgets.find(w => w.name === `modelStr_${loraIndex}`);
+                            const wClip = this.widgets.find(w => w.name === `clipStr_${loraIndex}`);
+
+                            if (wToggle) wToggle.value = true;
+                            if (wSegment) wSegment.value = info.widgets_values[i+1]; 
+                            if (wModel) wModel.value = info.widgets_values[i+2]; 
+                            if (wClip) wClip.value = info.widgets_values[i+3]; 
                             
                             loraIndex++;
-                            i += 3; // Lompat ke kelompok data selanjutnya
+                            i += 3;
                         }
                     }
                 }
 
-                // Lanjutkan fungsi bawaan ComfyUI
                 if (onConfigure) {
                     onConfigure.apply(this, arguments);
                 }
