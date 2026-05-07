@@ -749,14 +749,13 @@ class PromptRelayLoraGate(io.ComfyNode):
         return io.NodeOutput(patched_model, patched_clip)
 
 class PromptRelayPowerLoraGate:
-    """Applies multiple LoRAs to various temporal segments natively."""
+    """Applies multiple LoRAs to various temporal segments natively with toggles."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": ("MODEL",),
-                # segment_index global dihapus, dipindah ke masing-masing LoRA
             },
             "optional": {
                 "clip": ("CLIP", {"tooltip": "Optional CLIP model for global text patching."}),
@@ -795,8 +794,8 @@ class PromptRelayPowerLoraGate:
             idx = parts[1]
 
             if idx not in loras_to_load:
-                # Default value jika widget belum selesai termuat
-                loras_to_load[idx] = {"name": None, "segment": 0, "model_str": 1.0, "clip_str": 1.0}
+                # Default value ditambah "enable"
+                loras_to_load[idx] = {"name": None, "segment": 0, "model_str": 1.0, "clip_str": 1.0, "enable": True}
 
             if prefix == "lora" and isinstance(v, str):
                 loras_to_load[idx]["name"] = v
@@ -806,10 +805,17 @@ class PromptRelayPowerLoraGate:
                 loras_to_load[idx]["model_str"] = float(v)
             elif prefix == "clipStr":
                 loras_to_load[idx]["clip_str"] = float(v)
+            elif prefix == "enable":
+                loras_to_load[idx]["enable"] = bool(v)
 
         # 2. Loop dan terapkan semua LoRA ke segmen masing-masing
         for idx in sorted(loras_to_load.keys(), key=lambda x: int(x)):
             data = loras_to_load[idx]
+            
+            # Jika toggle dimatikan di UI, lewati LoRA ini
+            if not data.get("enable", True):
+                continue
+                
             lora_name = data.get("name")
             seg_idx = data.get("segment", 0)
             strength_model = data.get("model_str", 1.0)
@@ -821,7 +827,6 @@ class PromptRelayPowerLoraGate:
             if strength_model == 0.0 and strength_clip == 0.0:
                 continue
 
-            # Cek apakah segment yang dipilih ada
             if seg_idx >= len(segments):
                 log.warning(f"[PromptRelay PowerLoraGate] segment_index {seg_idx} is out of range. Skipping LoRA {lora_name}.")
                 continue
@@ -834,11 +839,11 @@ class PromptRelayPowerLoraGate:
             lora_file = comfy.utils.load_torch_file(lora_path, safe_load=True)
             segment = segments[seg_idx]
 
-            # Patch CLIP secara global (jika clip dihubungkan)
+            # Patch CLIP secara global
             if patched_clip is not None and strength_clip != 0.0:
                 _, patched_clip = comfy.sd.load_lora_for_models(None, patched_clip, lora_file, 0.0, strength_clip)
 
-            # Patch UNet secara temporal ke segmen spesifik
+            # Patch UNet secara temporal
             if strength_model != 0.0:
                 _apply_gated_lora(
                     patched_model,
@@ -849,7 +854,6 @@ class PromptRelayPowerLoraGate:
                     latent_frames,
                 )
 
-        # Teruskan metadata ke node selanjutnya dalam rantai
         patched_model.model_options["pr_segments"] = segments
         patched_model.model_options["pr_latent_frames"] = latent_frames
         patched_model.model_options["pr_tokens_per_frame"] = tokens_per_frame
