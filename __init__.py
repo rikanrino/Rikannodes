@@ -1,5 +1,5 @@
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .nodes import PromptRelayEncodeTimeline, PromptRelayLoraGate, PromptRelayPowerLoraGate
+from .nodes import RikanPromptRelayEncodeTimeline, RikanPromptRelayLoraGate, RikanPromptRelayPowerLoraGate
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -18,15 +18,15 @@ async def comfy_entrypoint() -> PromptRelay:
     return PromptRelay()
 
 NODE_CLASS_MAPPINGS = {
-    "PromptRelayEncodeTimeline": PromptRelayEncodeTimeline,
-    "PromptRelayLoraGate": PromptRelayLoraGate,
-    "PromptRelayPowerLoraGate": PromptRelayPowerLoraGate, 
+    "RikanPromptRelayEncodeTimeline": RikanPromptRelayEncodeTimeline,
+    "RikanPromptRelayLoraGate": RikanPromptRelayLoraGate,
+    "RikanPromptRelayPowerLoraGate": RikanPromptRelayPowerLoraGate, 
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PromptRelayEncodeTimeline": "Prompt Relay Encode (Timeline)",
-    "PromptRelayLoraGate": "Prompt Relay LoRA Gate",
-    "PromptRelayPowerLoraGate": "Prompt Relay Power Lora Gate",
+    "RikanPromptRelayEncodeTimeline": "Rikan Prompt Relay Encode (Timeline)",
+    "RikanPromptRelayLoraGate": "Rikan Prompt Relay LoRA Gate",
+    "RikanPromptRelayPowerLoraGate": "Rikan Prompt Relay Power Lora Gate",
 }
 
 
