@@ -215,7 +215,7 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
                 io.String.Input("segment_lengths", default=""),
                 io.Float.Input("epsilon", default=1e-3, min=1e-6, max=0.99, step=1e-4),
                 io.Float.Input("fps", default=24.0, min=0.1, max=240.0, optional=True),
-                io.Coms.Input("time_units", options=["frames", "seconds"], default="frames", optional=True),
+                io.Combo.Input("time_units", options=["frames", "seconds"], default="frames", optional=True),
             ],
             outputs=[
                 io.Model.Output(display_name="model"),
