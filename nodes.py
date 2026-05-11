@@ -67,11 +67,9 @@ def create_mask_fn(q_token_idx, fallback_tokens_per_frame, latent_frames):
                 cost = build_temporal_cost_scaled(q_token_idx, Lq, Lk, q.device, q.dtype, latent_frames)
             cache[key] = -cost
             
-            # --- TAMBAHKAN 3 BARIS INI UNTUK MEMUNCULKAN LOG ALA KIJAI ---
             nonzero = (cost > 0).sum().item()
             total = Lq * Lk
             log.info(f"[RikanPromptRelay] Built penalty matrix ({mode}): Lq={Lq}, Lk={Lk}, nonzero={nonzero}/{total}")
-            # -------------------------------------------------------------
             
         return cache[key].to(q.dtype)
     return mask_fn
@@ -289,7 +287,6 @@ def _apply_gated_lora(model_clone, lora_path, segment, strength, tokens_per_fram
     gate_weights = _build_gate_weights(segment, latent_frames)
     diffusion_model = model_clone.get_model_object("diffusion_model")
     
-    # Variabel logging untuk debug gaya Boyo
     applied = 0
     skipped_not_weight = 0
     skipped_not_diffusion = 0
@@ -345,7 +342,6 @@ def _apply_gated_lora(model_clone, lora_path, segment, strength, tokens_per_fram
         model_clone.add_object_patch(module_path + ".forward", wrapped.forward)
         applied += 1
 
-    # Print log debug ala Boyo!
     log.info(
         "[Rikan MultiLoraGate] Segment midpoint=%.1f window=%.1f — applied %d, not_weight=%d, not_diffusion=%d, bad_data=%d, not_linear=%d",
         float(segment["midpoint"]), float(segment["window"]), applied,
@@ -402,7 +398,6 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
 
         full_prompt, token_ranges = map_token_indices(get_raw_tokenizer(clip), global_prompt, locals_list)
         
-        # Log Token Info (Ala Boyo)
         log.info("[RikanPromptRelay] Global: tokens [0:%d] (%d tokens)", token_ranges[0][0], token_ranges[0][0])
         for i, (s, e) in enumerate(token_ranges):
             log.info("[RikanPromptRelay] Segment %d: tokens [%d:%d] (%d tokens)", i, s, e, e - s)
@@ -428,8 +423,6 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
         print(f"\n[Timeline] SUCCESS: Injected {len(q_token_idx)} segments.\n")
         return io.NodeOutput(patched, conditioning, float(fps), int(max_frames))
 
-# ── NEW: MULTI LORA GATE NODE ───────────────────────────────────
-
 class RikanPromptRelayMultiLoraGate(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -451,13 +444,13 @@ class RikanPromptRelayMultiLoraGate(io.ComfyNode):
         tokens_per_frame = model.model_options.get("rikan_pr_tokens_per_frame")
 
         if segments is None:
-            log.warning("[Rikan MultiLoraGate] Metadata Prompt Relay tidak ditemukan. Pastikan terhubung ke node Timeline.")
+            log.warning("[Rikan MultiLoraGate] Prompt Relay metadata not found. Ensure it is connected to the Timeline node.")
             return io.NodeOutput(model)
 
         try:
             loras_to_apply = json.loads(lora_data)
         except Exception as e:
-            log.error(f"[Rikan MultiLoraGate] Gagal memproses data JSON: {e}")
+            log.error(f"[Rikan MultiLoraGate] Failed to process JSON data: {e}")
             return io.NodeOutput(model)
 
         patched = model.clone()
@@ -471,21 +464,18 @@ class RikanPromptRelayMultiLoraGate(io.ComfyNode):
             seg_idx = int(lora.get("segment", 0)) 
             strength = float(lora.get("modelStr", 1.0))
 
-            # Pengecekan ketat dengan log deskriptif
             if seg_idx < 0 or seg_idx >= total_segments:
-                log.warning(f"[Rikan MultiLoraGate] SKIP: LoRA '{lora_name}' mencoba memakai Segmen {seg_idx}, "
-                            f"tapi Timeline hanya memiliki {total_segments} segmen (Tersedia indeks 0 sampai {total_segments-1}).")
+                log.warning(f"[Rikan MultiLoraGate] SKIP: LoRA '{lora_name}' attempts to use Segment {seg_idx}, "
+                            f"but the Timeline only has {total_segments} segment(s) (Available indices 0 to {total_segments-1}).")
                 continue
 
             lora_path = folder_paths.get_full_path("loras", lora_name)
             if lora_path is None:
-                log.warning(f"[Rikan MultiLoraGate] File LoRA tidak ditemukan: {lora_name}")
+                log.warning(f"[Rikan MultiLoraGate] LoRA file not found: {lora_name}")
                 continue
 
-            # Fungsi apply ini sekarang akan menge-print log debug ala Boyo
             _apply_gated_lora(patched, lora_path, segments[seg_idx], strength, tokens_per_frame, latent_frames)
 
-            # Teruskan metadata agar multi-lora tetap sinkron
             patched.model_options["rikan_pr_segments"] = segments
             patched.model_options["rikan_pr_latent_frames"] = latent_frames
             patched.model_options["rikan_pr_tokens_per_frame"] = tokens_per_frame
@@ -536,7 +526,8 @@ class RikanI2VPainterTiledVAE(io.ComfyNode):
         latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], 
                            device=comfy.model_management.intermediate_device())
         
-        positive_original, negative_original = positive, negative
+        positive_original = positive
+        negative_original = negative
         
         if start_image is not None:
             start_image = start_image[:1]
@@ -551,17 +542,195 @@ class RikanI2VPainterTiledVAE(io.ComfyNode):
             concat_latent_image_original = concat_latent_image.clone()
             
             if motion_amplitude > 1.0:
-                base_latent, gray_latent = concat_latent_image[:, :, 0:1], concat_latent_image[:, :, 1:]
+                base_latent = concat_latent_image[:, :, 0:1]
+                gray_latent = concat_latent_image[:, :, 1:]
+                
                 diff = gray_latent - base_latent
-                scaled_latent = base_latent + (diff - diff.mean(dim=(1, 3, 4), keepdim=True)) * motion_amplitude + diff.mean(dim=(1, 3, 4), keepdim=True)
-                concat_latent_image = torch.clamp(torch.cat([base_latent, scaled_latent], dim=2), -6, 6)
+                diff_mean = diff.mean(dim=(1, 3, 4), keepdim=True)
+                diff_centered = diff - diff_mean
+                
+                scaled_latent = base_latent + diff_centered * motion_amplitude + diff_mean
+                scaled_latent = torch.clamp(scaled_latent, -6, 6)
+                concat_latent_image = torch.cat([base_latent, scaled_latent], dim=2)
+                
+                post_enhanced = concat_latent_image.clone()
+                
+                if color_protect and correct_strength > 0:
+                    orig_mean = concat_latent_image_original.mean(dim=(2, 3, 4))
+                    enhanced_mean = post_enhanced.mean(dim=(2, 3, 4))
+                    
+                    mean_drift = torch.abs(enhanced_mean - orig_mean) / (torch.abs(orig_mean) + 1e-6)
+                    problem_channels = mean_drift > 0.18
+                    
+                    if problem_channels.any():
+                        drift_amount = enhanced_mean - orig_mean
+                        correction = drift_amount * problem_channels.float() * correct_strength * 0.03
+                        
+                        for b in range(batch_size):
+                            for c in range(16):
+                                if correction[b, c].abs() > 0:
+                                    post_enhanced[b, c] = torch.where(
+                                        post_enhanced[b, c] > 0,
+                                        post_enhanced[b, c] - correction[b, c],
+                                        post_enhanced[b, c]
+                                    )
+                    
+                    orig_brightness = concat_latent_image_original.mean()
+                    enhanced_brightness = post_enhanced.mean()
+                    
+                    if enhanced_brightness < orig_brightness * 0.92:
+                        brightness_boost = min(orig_brightness / (enhanced_brightness + 1e-6), 1.05)
+                        post_enhanced = torch.where(
+                            post_enhanced < 0.5,
+                            post_enhanced * brightness_boost,
+                            post_enhanced
+                        )
+                    
+                    concat_latent_image = torch.clamp(post_enhanced, -6, 6)
 
             positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
             negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
             
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"concat_latent_image": concat_latent_image_original, "concat_mask": mask})
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"concat_latent_image": concat_latent_image_original, "concat_mask": mask})
+            
             ref_latent = vae.encode_tiled(start_image[:,:,:,:3], tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
             positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
             negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True)
+            
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"reference_latents": [ref_latent]}, append=True)
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True)
+
+        if clip_vision is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision})
+            negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision})
+            
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"clip_vision_output": clip_vision})
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"clip_vision_output": clip_vision})
+
+        out_latent = {"samples": latent}
+        return io.NodeOutput(positive, negative, positive_original, negative_original, out_latent)
+
+
+class RikanI2VPainter(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="rikan-i2vpainter",
+            display_name="Rikan I2V Painter",
+            category="Rikannodes",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=832, min=16, max=4096, step=16),
+                io.Int.Input("height", default=480, min=16, max=4096, step=16),
+                io.Int.Input("length", default=81, min=1, max=4096, step=4),
+                io.Int.Input("batch_size", default=1, min=1, max=4096),
+                io.Float.Input("motion_amplitude", default=1.3, min=1.0, max=2.0, step=0.05),
+                io.Boolean.Input("color_protect", default=True),
+                io.Float.Input("correct_strength", default=0.01, min=0.0, max=0.3, step=0.01),
+                io.ClipVisionOutput.Input("clip_vision", optional=True),
+                io.Image.Input("start_image", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="high_positive"),
+                io.Conditioning.Output(display_name="high_negative"),
+                io.Conditioning.Output(display_name="low_positive"),
+                io.Conditioning.Output(display_name="low_negative"),
+                io.Latent.Output(display_name="latent"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, batch_size,
+                motion_amplitude=1.3, color_protect=True, correct_strength=0.01, 
+                start_image=None, clip_vision=None) -> io.NodeOutput:
+        
+        latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], 
+                           device=comfy.model_management.intermediate_device())
+        
+        positive_original = positive
+        negative_original = negative
+        
+        if start_image is not None:
+            start_image = start_image[:1]
+            start_image = comfy.utils.common_upscale(start_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+            image = torch.ones((length, height, width, 3), device=start_image.device, dtype=start_image.dtype) * 0.5
+            image[0] = start_image[0]
+            
+            concat_latent_image = vae.encode(image[:, :, :, :3])
+            mask = torch.ones((1, 1, latent.shape[2], concat_latent_image.shape[-2], concat_latent_image.shape[-1]), device=start_image.device)
+            mask[:, :, 0] = 0.0
+            
+            concat_latent_image_original = concat_latent_image.clone()
+            
+            if motion_amplitude > 1.0:
+                base_latent = concat_latent_image[:, :, 0:1]
+                gray_latent = concat_latent_image[:, :, 1:]
+                
+                diff = gray_latent - base_latent
+                diff_mean = diff.mean(dim=(1, 3, 4), keepdim=True)
+                diff_centered = diff - diff_mean
+                
+                scaled_latent = base_latent + diff_centered * motion_amplitude + diff_mean
+                scaled_latent = torch.clamp(scaled_latent, -6, 6)
+                concat_latent_image = torch.cat([base_latent, scaled_latent], dim=2)
+                
+                post_enhanced = concat_latent_image.clone()
+                
+                if color_protect and correct_strength > 0:
+                    orig_mean = concat_latent_image_original.mean(dim=(2, 3, 4))
+                    enhanced_mean = post_enhanced.mean(dim=(2, 3, 4))
+                    
+                    mean_drift = torch.abs(enhanced_mean - orig_mean) / (torch.abs(orig_mean) + 1e-6)
+                    problem_channels = mean_drift > 0.18
+                    
+                    if problem_channels.any():
+                        drift_amount = enhanced_mean - orig_mean
+                        correction = drift_amount * problem_channels.float() * correct_strength * 0.03
+                        
+                        for b in range(batch_size):
+                            for c in range(16):
+                                if correction[b, c].abs() > 0:
+                                    post_enhanced[b, c] = torch.where(
+                                        post_enhanced[b, c] > 0,
+                                        post_enhanced[b, c] - correction[b, c],
+                                        post_enhanced[b, c]
+                                    )
+                    
+                    orig_brightness = concat_latent_image_original.mean()
+                    enhanced_brightness = post_enhanced.mean()
+                    
+                    if enhanced_brightness < orig_brightness * 0.92:
+                        brightness_boost = min(orig_brightness / (enhanced_brightness + 1e-6), 1.05)
+                        post_enhanced = torch.where(
+                            post_enhanced < 0.5,
+                            post_enhanced * brightness_boost,
+                            post_enhanced
+                        )
+                    
+                    concat_latent_image = torch.clamp(post_enhanced, -6, 6)
+
+            positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+            negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+            
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"concat_latent_image": concat_latent_image_original, "concat_mask": mask})
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"concat_latent_image": concat_latent_image_original, "concat_mask": mask})
+            
+            ref_latent = vae.encode(start_image[:,:,:,:3])
+            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
+            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True)
+            
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"reference_latents": [ref_latent]}, append=True)
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True)
+
+        if clip_vision is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision})
+            negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision})
+            
+            positive_original = node_helpers.conditioning_set_values(positive_original, {"clip_vision_output": clip_vision})
+            negative_original = node_helpers.conditioning_set_values(negative_original, {"clip_vision_output": clip_vision})
 
         out_latent = {"samples": latent}
         return io.NodeOutput(positive, negative, positive_original, negative_original, out_latent)
@@ -588,6 +757,156 @@ class RikanHiddenBase64ImageLoader(io.ComfyNode):
             return io.NodeOutput(img, base64_data)
         except: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
 
+# ── NEW: WAN SPATIO-TEMPORAL TILED VAE DECODE ───────────────────────────────
+
+class RikanWanSpatioTemporalTiledVAEDecode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanWanSpatioTemporalTiledVAEDecode",
+            display_name="Rikan Wan Spatio-Temporal Tiled VAE Decode",
+            category="Rikannodes",
+            inputs=[
+                io.Vae.Input("vae"),
+                io.Latent.Input("latents"),
+                io.Int.Input("spatial_tiles", default=4, min=1, max=8),
+                io.Int.Input("spatial_overlap", default=4, min=0, max=8),
+                io.Int.Input("temporal_tile_length", default=16, min=2, max=1000),
+                io.Int.Input("temporal_overlap", default=4, min=0, max=8),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, vae, latents, spatial_tiles=2, spatial_overlap=1, temporal_tile_length=16, temporal_overlap=1) -> io.NodeOutput:
+        samples = latents["samples"]
+        batch, channels, frames, height, width = samples.shape
+
+        # Menganalisis faktor skala secara dinamis (mengadaptasi berbagai jenis model)
+        dummy_latent = torch.zeros((1, channels, 2, 2, 2), device=samples.device, dtype=samples.dtype)
+        dummy_out = vae.decode(dummy_latent)
+        
+        # PERBAIKAN: Membaca shape dari belakang agar aman dari perbedaan 4D vs 5D tensor
+        f_out = dummy_out.shape[-4]
+        h_out = dummy_out.shape[-3]
+        w_out = dummy_out.shape[-2]
+
+        time_scale_factor = (f_out - 1) // (2 - 1)
+        height_scale_factor = h_out // 2
+        width_scale_factor = w_out // 2
+
+        image_frames = 1 + (frames - 1) * time_scale_factor
+        output_height = height * height_scale_factor
+        output_width = width * width_scale_factor
+
+        target_device = samples.device
+        target_dtype = torch.float32
+
+        def compute_chunk_boundaries(chunk_start, temp_len, temp_overlap, total_frames):
+            if chunk_start == 0:
+                return chunk_start, min(chunk_start + temp_len, total_frames)
+            overlap_start = max(1, chunk_start - temp_overlap - 1)
+            extra_frames = chunk_start - overlap_start
+            chunk_end = min(chunk_start + temp_len - extra_frames, total_frames)
+            return overlap_start, chunk_end
+
+        def decode_spatial(temporal_chunk):
+            chunk_frames = temporal_chunk.shape[2]
+            chunk_out_frames = 1 + (chunk_frames - 1) * time_scale_factor
+
+            base_tile_height = (height + (spatial_tiles - 1) * spatial_overlap) // spatial_tiles
+            base_tile_width = (width + (spatial_tiles - 1) * spatial_overlap) // spatial_tiles
+
+            out_chunk = torch.zeros((batch, chunk_out_frames, output_height, output_width, 3), device=target_device, dtype=target_dtype)
+            out_weights = torch.zeros((batch, chunk_out_frames, output_height, output_width, 1), device=target_device, dtype=target_dtype)
+
+            for v in range(spatial_tiles):
+                for h in range(spatial_tiles):
+                    h_start = h * (base_tile_width - spatial_overlap)
+                    v_start = v * (base_tile_height - spatial_overlap)
+                    h_end = min(h_start + base_tile_width, width) if h < spatial_tiles - 1 else width
+                    v_end = min(v_start + base_tile_height, height) if v < spatial_tiles - 1 else height
+
+                    tile = temporal_chunk[:, :, :, v_start:v_end, h_start:h_end]
+                    
+                    log.info(f"[Rikan VAE] Decoding spatial tile ({v},{h}) size: {tile.shape}")
+                    decoded_tile = vae.decode(tile).to(target_device, target_dtype)
+                    
+                    # PERBAIKAN: Memastikan formatnya selalu 5D [Batch, Frame, Height, Width, Channels]
+                    if len(decoded_tile.shape) == 4:
+                        decoded_tile = decoded_tile.view(batch, chunk_out_frames, decoded_tile.shape[-3], decoded_tile.shape[-2], decoded_tile.shape[-1])
+                    
+                    out_h_start = v_start * height_scale_factor
+                    out_h_end = v_end * height_scale_factor
+                    out_w_start = h_start * width_scale_factor
+                    out_w_end = h_end * width_scale_factor
+
+                    tile_weights = torch.ones((batch, chunk_out_frames, out_h_end - out_h_start, out_w_end - out_w_start, 1), device=target_device, dtype=target_dtype)
+
+                    overlap_out_h = spatial_overlap * height_scale_factor
+                    overlap_out_w = spatial_overlap * width_scale_factor
+
+                    if h > 0:
+                        h_blend = torch.linspace(0, 1, overlap_out_w, device=target_device, dtype=target_dtype)
+                        tile_weights[:, :, :, :overlap_out_w, :] *= h_blend.view(1, 1, 1, -1, 1)
+                    if h < spatial_tiles - 1:
+                        h_blend = torch.linspace(1, 0, overlap_out_w, device=target_device, dtype=target_dtype)
+                        tile_weights[:, :, :, -overlap_out_w:, :] *= h_blend.view(1, 1, 1, -1, 1)
+                    if v > 0:
+                        v_blend = torch.linspace(0, 1, overlap_out_h, device=target_device, dtype=target_dtype)
+                        tile_weights[:, :, :overlap_out_h, :, :] *= v_blend.view(1, 1, -1, 1, 1)
+                    if v < spatial_tiles - 1:
+                        v_blend = torch.linspace(1, 0, overlap_out_h, device=target_device, dtype=target_dtype)
+                        tile_weights[:, :, -overlap_out_h:, :, :] *= v_blend.view(1, 1, -1, 1, 1)
+
+                    out_chunk[:, :, out_h_start:out_h_end, out_w_start:out_w_end, :] += decoded_tile * tile_weights
+                    out_weights[:, :, out_h_start:out_h_end, out_w_start:out_w_end, :] += tile_weights
+
+            out_chunk /= out_weights + 1e-8
+            return out_chunk
+
+        output = torch.empty((batch, image_frames, output_height, output_width, 3), device=target_device, dtype=target_dtype)
+
+        chunk_start = 0
+        while chunk_start < frames:
+            overlap_start, chunk_end = compute_chunk_boundaries(chunk_start, temporal_tile_length, temporal_overlap, frames)
+
+            temp_tile = samples[:, :, overlap_start:chunk_end]
+            
+            log.info(f"[Rikan VAE] Processing temporal chunk {overlap_start}:{chunk_end} (length: {chunk_end - overlap_start})")
+            decoded_chunk = decode_spatial(temp_tile)
+
+            if chunk_start == 0:
+                output[:, :decoded_chunk.shape[1]] = decoded_chunk
+            else:
+                decoded_chunk = decoded_chunk[:, 1:]
+                out_t_start = 1 + overlap_start * time_scale_factor
+                out_t_end = out_t_start + decoded_chunk.shape[1]
+
+                overlap_frames = temporal_overlap * time_scale_factor
+                frame_weights = torch.linspace(0, 1, overlap_frames + 2, device=target_device, dtype=target_dtype)[1:-1]
+                tile_weights = frame_weights.view(1, -1, 1, 1, 1)
+
+                after_overlap = out_t_start + overlap_frames
+
+                overlap_out = decoded_chunk[:, :overlap_frames]
+                output[:, out_t_start:after_overlap] *= (1 - tile_weights)
+                output[:, out_t_start:after_overlap] += (tile_weights * overlap_out)
+
+                output[:, after_overlap:out_t_end] = decoded_chunk[:, overlap_frames:]
+
+            chunk_start = chunk_end
+
+        output = output.view(batch * image_frames, output_height, output_width, 3)
+
+        if target_device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        return io.NodeOutput(output)
+
+
 # ==============================================================================
 # MAPPINGS & REGISTRATION
 # ==============================================================================
@@ -599,7 +918,9 @@ class RikannodesExtension(ComfyExtension):
             RikanPromptRelayEncodeTimeline,
             RikanPromptRelayMultiLoraGate,
             RikanI2VPainterTiledVAE,
-            RikanHiddenBase64ImageLoader
+            RikanI2VPainter,
+            RikanHiddenBase64ImageLoader,
+            RikanWanSpatioTemporalTiledVAEDecode
         ]
 
 async def comfy_entrypoint() -> RikannodesExtension:
@@ -609,12 +930,16 @@ NODE_CLASS_MAPPINGS = {
     "RikanPromptRelayEncodeTimeline": RikanPromptRelayEncodeTimeline,
     "RikanPromptRelayMultiLoraGate": RikanPromptRelayMultiLoraGate,
     "rikan-i2vpainter-tiled-vae": RikanI2VPainterTiledVAE,
+    "rikan-i2vpainter": RikanI2VPainter,
     "RikanHiddenBase64ImageLoader": RikanHiddenBase64ImageLoader,
+    "RikanWanSpatioTemporalTiledVAEDecode": RikanWanSpatioTemporalTiledVAEDecode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RikanPromptRelayEncodeTimeline": "Rikan Prompt Relay Encode (Timeline)",
     "RikanPromptRelayMultiLoraGate": "Rikan Prompt Relay Multi LoRA Gate",
     "rikan-i2vpainter-tiled-vae": "Rikan I2V Painter (Tiled VAE)",
+    "rikan-i2vpainter": "Rikan I2V Painter",
     "RikanHiddenBase64ImageLoader": "Rikan Hidden Base64 Image Loader",
+    "RikanWanSpatioTemporalTiledVAEDecode": "Rikan Wan Spatio-Temporal Tiled VAE Decode"
 }
