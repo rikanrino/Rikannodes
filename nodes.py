@@ -3,15 +3,23 @@ import math
 import types
 import torch
 import torch.nn as nn
+import numpy as np
+import base64
+import io as pyio
+from PIL import Image
 import comfy.utils
 import folder_paths
+import node_helpers
+import comfy.model_management
 import comfy.ldm.modules.attention
-from comfy_api.latest import io
+import json
+from comfy_api.latest import io, ComfyExtension
+from typing_extensions import override
 
 log = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1. CORE UTILS & MATH (Dibutuhkan oleh Timeline Node)
+# 1. CORE UTILS & MATH
 # ==============================================================================
 
 def build_temporal_cost(q_token_idx, Lq, Lk, device, dtype, tokens_per_frame):
@@ -135,7 +143,7 @@ def _convert_to_latent_lengths(pixel_lengths, temporal_stride, latent_frames):
     return result
 
 # ==============================================================================
-# 2. MODEL PATCHING
+# 2. MODEL PATCHING & LORA GATE HELPERS
 # ==============================================================================
 
 def detect_model_type(model):
@@ -167,7 +175,6 @@ def apply_patches(model_clone, arch, mask_fn):
                 module = getattr(block, attr, None)
                 if module: model_clone.add_object_patch(f"diffusion_model.transformer_blocks.{idx}.{attr}.forward", _CrossAttnPatch(_ltx_forward, mask_fn).__get__(module))
 
-# Patch implementation functions (Simplified)
 def _wan_t2v_forward(self, mask_fn, x, context, transformer_options={}, **kwargs):
     q, k, v = self.norm_q(self.q(x)), self.norm_k(self.k(context)), self.v(context)
     mask = mask_fn(q, k, transformer_options)
@@ -193,8 +200,100 @@ def _ltx_forward(self, mask_fn, x, context=None, mask=None, pe=None, k_pe=None, 
     if self.to_gate_logits: out = out * (2.0 * torch.sigmoid(self.to_gate_logits(x))).unsqueeze(-1)
     return self.to_out(out)
 
+# ── LORA GATE INTERNAL CLASSES ───────────────────────────────────────────────
+
+class _TemporalGatedLoRA:
+    def __init__(self, original, lora_down, lora_up, scale, strength, gate_weights, tokens_per_frame):
+        self.original = original
+        self._lora_down = lora_down.cpu()
+        self._lora_up = lora_up.cpu()
+        self.scale = scale
+        self.strength = strength
+        self._gate_weights = gate_weights.cpu()
+        self.tokens_per_frame = tokens_per_frame
+
+    def forward(self, x, *args, **kwargs):
+        base = self.original(x, *args, **kwargs)
+        lora_down = self._lora_down.to(device=x.device, dtype=x.dtype)
+        lora_up = self._lora_up.to(device=x.device, dtype=x.dtype)
+
+        delta = (x @ lora_down.T) @ lora_up.T
+        delta = delta * (self.scale * self.strength)
+
+        if x.dim() < 2: return base + delta
+
+        seq_len = x.shape[-2]
+        n_frames = len(self._gate_weights)
+        n_video_tokens = n_frames * self.tokens_per_frame
+
+        if seq_len >= n_video_tokens and n_video_tokens > 0:
+            gate_weights = self._gate_weights.to(device=x.device, dtype=x.dtype)
+            frame_idx = torch.arange(n_video_tokens, device=x.device) // self.tokens_per_frame
+            frame_idx = frame_idx.clamp(0, n_frames - 1)
+            video_gates = gate_weights[frame_idx]
+            
+            if seq_len > n_video_tokens:
+                extra = torch.zeros(seq_len - n_video_tokens, device=x.device, dtype=x.dtype)
+                token_gates = torch.cat([video_gates, extra])
+            else:
+                token_gates = video_gates
+            
+            view_shape = (1,) * (x.dim() - 2) + (seq_len, 1)
+            delta = delta * token_gates.view(view_shape)
+
+        return base + delta
+
+def _build_gate_weights(seg, latent_frames):
+    midpoint, window, sigma = float(seg["midpoint"]), float(seg["window"]), float(seg["sigma"])
+    weights = []
+    for frame in range(latent_frames):
+        d = abs(frame - midpoint)
+        cost = (max(d - window, 0.0) ** 2) / (2.0 * sigma ** 2)
+        weights.append(math.exp(-cost))
+    return torch.tensor(weights, dtype=torch.float32)
+
+def _get_module(diffusion_model, local_path):
+    m = diffusion_model
+    for part in local_path.split("."): m = getattr(m, part)
+    return m
+
+def _apply_gated_lora(model_clone, lora_path, segment, strength, tokens_per_frame, latent_frames):
+    try:
+        try: import comfy.loras as _lora_mod
+        except ImportError: import comfy.lora as _lora_mod
+    except ImportError: return
+
+    lora_file = comfy.utils.load_torch_file(lora_path, safe_load=True)
+    key_map = {}
+    _lora_mod.model_lora_keys_unet(model_clone.model, key_map)
+    patches = _lora_mod.load_lora(lora_file, key_map)
+    
+    gate_weights = _build_gate_weights(segment, latent_frames)
+    diffusion_model = model_clone.get_model_object("diffusion_model")
+    
+    for param_key, patch_data in patches.items():
+        if not param_key.endswith(".weight"): continue
+        module_path = param_key[:-7]
+        if not module_path.startswith("diffusion_model."): continue
+        
+        local_path = module_path[len("diffusion_model."):]
+        try:
+            lora_up, lora_down, alpha = patch_data.weights[0], patch_data.weights[1], patch_data.multiplier
+        except: continue
+        
+        if lora_up is None or lora_down is None or lora_down.dim() != 2: continue
+        
+        scale = float(alpha) / lora_down.shape[0] if alpha is not None else 1.0
+        target = model_clone.object_patches.get(module_path)
+        if target is None:
+            try: target = _get_module(diffusion_model, local_path)
+            except AttributeError: continue
+
+        wrapped = _TemporalGatedLoRA(target.forward, lora_down, lora_up, scale, strength, gate_weights, tokens_per_frame)
+        model_clone.add_object_patch(module_path + ".forward", wrapped.forward)
+
 # ==============================================================================
-# 3. MAIN NODE: RIkan Prompt Relay Encode (Timeline)
+# 3. NODES
 # ==============================================================================
 
 class RikanPromptRelayEncodeTimeline(io.ComfyNode):
@@ -215,6 +314,7 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
                 io.String.Input("segment_lengths", default=""),
                 io.Float.Input("epsilon", default=1e-3, min=1e-6, max=0.99, step=1e-4),
                 io.Float.Input("fps", default=24.0, min=0.1, max=240.0, optional=True),
+                io.Float.Input("seconds", default=5.375, min=0.1, max=1000.0, step=0.1, optional=True),
                 io.Combo.Input("time_units", options=["frames", "seconds"], default="frames", optional=True),
             ],
             outputs=[
@@ -226,7 +326,7 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, clip, latent, global_prompt, max_frames, timeline_data, local_prompts, segment_lengths, epsilon, fps=24.0, time_units="frames") -> io.NodeOutput:
+    def execute(cls, model, clip, latent, global_prompt, max_frames, timeline_data, local_prompts, segment_lengths, epsilon, fps=24.0, seconds=5.375, time_units="frames") -> io.NodeOutput:
         locals_list = [p.strip() for p in local_prompts.split("|") if p.strip()]
         if not locals_list: raise ValueError("At least one local prompt is required.")
 
@@ -250,7 +350,7 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
         patched = model.clone()
         apply_patches(patched, arch, mask_fn)
 
-        # Simpan metadata untuk kompatibilitas
+        # Simpan metadata untuk LoRA Gate
         for key in ["rikan_pr_segments", "pr_segments"]: patched.model_options[key] = q_token_idx
         for key in ["rikan_pr_latent_frames", "pr_latent_frames"]: patched.model_options[key] = latent_frames
         for key in ["rikan_pr_tokens_per_frame", "pr_tokens_per_frame"]: patched.model_options[key] = tokens_per_frame
@@ -258,9 +358,189 @@ class RikanPromptRelayEncodeTimeline(io.ComfyNode):
         print(f"\n[Timeline] SUCCESS: Injected {len(q_token_idx)} segments.\n")
         return io.NodeOutput(patched, conditioning, float(fps), int(max_frames))
 
+# ── NEW: MULTI LORA GATE NODE ───────────────────────────────────
+
+class RikanPromptRelayMultiLoraGate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanPromptRelayMultiLoraGate",
+            display_name="Rikan Prompt Relay Multi LoRA Gate",
+            category="Rikannodes",
+            inputs=[
+                io.Model.Input("model"),
+                io.String.Input("lora_data", default="[]", multiline=True),
+            ],
+            outputs=[io.Model.Output(display_name="model")],
+        )
+
+    @classmethod
+    def execute(cls, model, lora_data) -> io.NodeOutput:
+        segments = model.model_options.get("rikan_pr_segments")
+        latent_frames = model.model_options.get("rikan_pr_latent_frames")
+        tokens_per_frame = model.model_options.get("rikan_pr_tokens_per_frame")
+
+        if segments is None:
+            log.warning("[Rikan MultiLoraGate] Metadata Prompt Relay tidak ditemukan.")
+            return io.NodeOutput(model)
+
+        try:
+            loras_to_apply = json.loads(lora_data)
+        except Exception as e:
+            log.error(f"[Rikan MultiLoraGate] Gagal memproses data LoRA: {e}")
+            return io.NodeOutput(model)
+
+        patched = model.clone()
+
+        for lora in loras_to_apply:
+            if not lora.get("enable", False) or lora.get("name") == "None":
+                continue
+
+            lora_name = lora.get("name")
+            # Index di UI sekarang dimulai dari 0, sejajar dengan index array
+            seg_idx = int(lora.get("segment", 0)) 
+            strength = float(lora.get("modelStr", 1.0))
+
+            if seg_idx < 0 or seg_idx >= len(segments):
+                log.warning(f"[Rikan MultiLoraGate] Segmen {seg_idx} di luar jangkauan timeline.")
+                continue
+
+            lora_path = folder_paths.get_full_path("loras", lora_name)
+            if lora_path is None:
+                log.warning(f"[Rikan MultiLoraGate] File LoRA tidak ditemukan: {lora_name}")
+                continue
+
+            _apply_gated_lora(patched, lora_path, segments[seg_idx], strength, tokens_per_frame, latent_frames)
+
+            patched.model_options["rikan_pr_segments"] = segments
+            patched.model_options["rikan_pr_latent_frames"] = latent_frames
+            patched.model_options["rikan_pr_tokens_per_frame"] = tokens_per_frame
+
+        return io.NodeOutput(patched)
+
+
+class RikanI2VPainterTiledVAE(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="rikan-i2vpainter-tiled-vae",
+            display_name="Rikan I2V Painter (Tiled VAE)",
+            category="Rikannodes",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=832, min=16, max=4096, step=16),
+                io.Int.Input("height", default=480, min=16, max=4096, step=16),
+                io.Int.Input("length", default=81, min=1, max=4096, step=4),
+                io.Int.Input("batch_size", default=1, min=1, max=4096),
+                io.Int.Input("tile_size", default=512, min=64, max=4096, step=64),
+                io.Int.Input("overlap", default=64, min=0, max=4096, step=32),
+                io.Int.Input("temporal_size", default=64, min=8, max=4096, step=4),
+                io.Int.Input("temporal_overlap", default=24, min=4, max=4096, step=4),
+                io.Float.Input("motion_amplitude", default=1.3, min=1.0, max=2.0, step=0.05),
+                io.Boolean.Input("color_protect", default=True),
+                io.Float.Input("correct_strength", default=0.01, min=0.0, max=0.3, step=0.01),
+                io.ClipVisionOutput.Input("clip_vision", optional=True),
+                io.Image.Input("start_image", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="high_positive"),
+                io.Conditioning.Output(display_name="high_negative"),
+                io.Conditioning.Output(display_name="low_positive"),
+                io.Conditioning.Output(display_name="low_negative"),
+                io.Latent.Output(display_name="latent"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, batch_size,
+                tile_size=512, overlap=64, temporal_size=64, temporal_overlap=8,
+                motion_amplitude=1.3, color_protect=True, correct_strength=0.01, 
+                start_image=None, clip_vision=None) -> io.NodeOutput:
+        
+        latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], 
+                           device=comfy.model_management.intermediate_device())
+        
+        positive_original, negative_original = positive, negative
+        
+        if start_image is not None:
+            start_image = start_image[:1]
+            start_image = comfy.utils.common_upscale(start_image.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+            image = torch.ones((length, height, width, 3), device=start_image.device, dtype=start_image.dtype) * 0.5
+            image[0] = start_image[0]
+            
+            concat_latent_image = vae.encode_tiled(image, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
+            mask = torch.ones((1, 1, latent.shape[2], concat_latent_image.shape[-2], concat_latent_image.shape[-1]), device=start_image.device)
+            mask[:, :, 0] = 0.0
+            
+            concat_latent_image_original = concat_latent_image.clone()
+            
+            if motion_amplitude > 1.0:
+                base_latent, gray_latent = concat_latent_image[:, :, 0:1], concat_latent_image[:, :, 1:]
+                diff = gray_latent - base_latent
+                scaled_latent = base_latent + (diff - diff.mean(dim=(1, 3, 4), keepdim=True)) * motion_amplitude + diff.mean(dim=(1, 3, 4), keepdim=True)
+                concat_latent_image = torch.clamp(torch.cat([base_latent, scaled_latent], dim=2), -6, 6)
+
+            positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+            negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+            
+            ref_latent = vae.encode_tiled(start_image[:,:,:,:3], tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
+            positive = node_helpers.conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
+            negative = node_helpers.conditioning_set_values(negative, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True)
+
+        out_latent = {"samples": latent}
+        return io.NodeOutput(positive, negative, positive_original, negative_original, out_latent)
+
+
+class RikanHiddenBase64ImageLoader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanHiddenBase64ImageLoader",
+            display_name="Rikan Hidden Base64 Image Loader",
+            category="Rikannodes",
+            inputs=[io.String.Input("base64_data", multiline=True, default="")],
+            outputs=[io.Image.Output(display_name="image"), io.String.Output(display_name="raw_base64")]
+        )
+
+    @classmethod
+    def execute(cls, base64_data) -> io.NodeOutput:
+        if not base64_data: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
+        try:
+            if "," in base64_data: base64_data = base64_data.split(",")[1]
+            img = Image.open(pyio.BytesIO(base64.b64decode(base64_data))).convert("RGB")
+            img = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+            return io.NodeOutput(img, base64_data)
+        except: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
+
 # ==============================================================================
-# MAPPINGS
+# MAPPINGS & REGISTRATION
 # ==============================================================================
 
-NODE_CLASS_MAPPINGS = { "RikanPromptRelayEncodeTimeline": RikanPromptRelayEncodeTimeline }
-NODE_DISPLAY_NAME_MAPPINGS = { "RikanPromptRelayEncodeTimeline": "Rikan Prompt Relay Encode (Timeline)" }
+class RikannodesExtension(ComfyExtension):
+    @override
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            RikanPromptRelayEncodeTimeline,
+            RikanPromptRelayMultiLoraGate,
+            RikanI2VPainterTiledVAE,
+            RikanHiddenBase64ImageLoader
+        ]
+
+async def comfy_entrypoint() -> RikannodesExtension:
+    return RikannodesExtension()
+
+NODE_CLASS_MAPPINGS = {
+    "RikanPromptRelayEncodeTimeline": RikanPromptRelayEncodeTimeline,
+    "RikanPromptRelayMultiLoraGate": RikanPromptRelayMultiLoraGate,
+    "rikan-i2vpainter-tiled-vae": RikanI2VPainterTiledVAE,
+    "RikanHiddenBase64ImageLoader": RikanHiddenBase64ImageLoader,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "RikanPromptRelayEncodeTimeline": "Rikan Prompt Relay Encode (Timeline)",
+    "RikanPromptRelayMultiLoraGate": "Rikan Prompt Relay Multi LoRA Gate",
+    "rikan-i2vpainter-tiled-vae": "Rikan I2V Painter (Tiled VAE)",
+    "RikanHiddenBase64ImageLoader": "Rikan Hidden Base64 Image Loader",
+}
