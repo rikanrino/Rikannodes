@@ -23,8 +23,6 @@ function hideWidget(w) {
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
 function pickColor(existingColors) {
-  // First palette color not currently in use; otherwise generate one via golden-angle hue
-  // rotation so additional segments stay visually distinct without colliding with the palette.
   for (const c of PALETTE) if (!existingColors.has(c)) return c;
   const idx = existingColors.size;
   const hue = (idx * 137.508) % 360;
@@ -50,7 +48,6 @@ function parseInitial(jsonStr, maxFrames) {
         segments: obj.segments.map((s, i) => ({
           prompt: typeof s.prompt === "string" ? s.prompt : "",
           length: Math.max(MIN_SEGMENT_LENGTH, parseInt(s.length, 10) || MIN_SEGMENT_LENGTH),
-          // Backward compat: assign a stable color if missing.
           color: typeof s.color === "string" ? s.color : PALETTE[i % PALETTE.length],
         })),
       };
@@ -63,8 +60,10 @@ class TimelineEditor {
   constructor(node, container) {
     this.node = node;
     this.container = container;
+    
     this.maxFramesWidget = node.widgets.find(w => w.name === "max_frames");
     this.fpsWidget = node.widgets.find(w => w.name === "fps");
+    this.secondsWidget = node.widgets.find(w => w.name === "seconds");
     this.timeUnitsWidget = node.widgets.find(w => w.name === "time_units");
     this.timelineDataWidget = node.widgets.find(w => w.name === "timeline_data");
     this.localPromptsWidget = node.widgets.find(w => w.name === "local_prompts");
@@ -76,11 +75,10 @@ class TimelineEditor {
     this.hoverHandle = -1;
     this.dragHandle = -1;
     this.dragStart = null;
-    this.reorder = null;  // { sourceIdx, targetIdx, startX, startY, active }
-    this._settling = false;  // true between reorder release and animation convergence
-    this._inputBaseline = null;  // length snapshot for revertible lengthInput edits
-    this._textCommitTimer = null;  // debounce handle for textarea-driven commits
-    // Per-segment displayed X (animated). Keyed by segment array index.
+    this.reorder = null; 
+    this._settling = false; 
+    this._inputBaseline = null; 
+    this._textCommitTimer = null; 
     this._displayedX = new Map();
     this._targetX = new Map();
     this._animRaf = null;
@@ -105,16 +103,12 @@ class TimelineEditor {
     return this.timeUnitsWidget?.value === "seconds";
   }
 
-  // Format an integer frame count for display in the current units. In seconds mode we show
-  // a tidy decimal (trims trailing zeros) so 24-frame chunks render as "1s" not "1.00s".
   formatTime(frames) {
     if (!this.isSecondsMode()) return String(frames);
     const s = frames / this.getFps();
     return `${s.toFixed(2).replace(/\.?0+$/, "")}s`;
   }
 
-  // Length-suffix shown on each block. Frames mode adds an "f" suffix here (not in the
-  // ruler) so block labels read as a duration, not a frame index.
   formatLength(frames) {
     return this.isSecondsMode() ? this.formatTime(frames) : `${frames}f`;
   }
@@ -170,18 +164,10 @@ class TimelineEditor {
     spacer.style.flex = "1";
     row.appendChild(spacer);
 
-    this.addBtn = this.makeButton(
-      "+ Add",
-      "Add a new segment. Steals space from existing segments (from the end) if the timeline is full.",
-    );
-    this.distributeBtn = this.makeButton(
-      "Equalize",
-      "Set every segment to the same length so the total exactly fills max_frames.",
-    );
-    this.deleteBtn = this.makeButton(
-      "Delete",
-      "Remove the currently selected segment. Disabled when only one segment is left.",
-    );
+    this.addBtn = this.makeButton("+ Add", "Add a new segment. Steals space from existing segments (from the end) if the timeline is full.");
+    this.distributeBtn = this.makeButton("Equalize", "Set every segment to the same length so the total exactly fills max_frames.");
+    this.deleteBtn = this.makeButton("Delete", "Remove the currently selected segment. Disabled when only one segment is left.");
+    
     row.appendChild(this.addBtn);
     row.appendChild(this.distributeBtn);
     row.appendChild(this.deleteBtn);
@@ -203,7 +189,6 @@ class TimelineEditor {
   }
 
   bindEvents() {
-    // stopPropagation prevents LiteGraph from treating clicks as node-drag/zoom
     this.canvas.addEventListener("pointerdown", e => { e.stopPropagation(); this.onPointerDown(e); });
     this.canvas.addEventListener("pointermove", e => { e.stopPropagation(); this.onPointerMove(e); });
     this.canvas.addEventListener("pointerup", e => { e.stopPropagation(); this.onPointerUp(e); });
@@ -217,7 +202,7 @@ class TimelineEditor {
         this.render();
       }
     });
-    // Keep textarea scrolling/typing from zooming or hijacking the graph
+
     this.textarea.addEventListener("wheel", e => e.stopPropagation(), { passive: true });
     this.textarea.addEventListener("pointerdown", e => e.stopPropagation());
     this.lengthInput.addEventListener("pointerdown", e => e.stopPropagation());
@@ -227,13 +212,10 @@ class TimelineEditor {
       const seg = this.timeline.segments[this.selectedIndex];
       if (!seg) return;
       seg.prompt = this.textarea.value;
-      // Update local_prompts widget immediately so a workflow run picks up the latest text
-      // even if the debounced commit hasn't fired yet.
       if (this.localPromptsWidget) {
         this.localPromptsWidget.value = this.timeline.segments.map(s => s.prompt).join(" | ");
       }
       this.render();
-      // Debounce the heavier timeline_data JSON write.
       if (this._textCommitTimer) clearTimeout(this._textCommitTimer);
       this._textCommitTimer = setTimeout(() => {
         this._textCommitTimer = null;
@@ -255,13 +237,11 @@ class TimelineEditor {
       if (!seg) return;
       const raw = parseFloat(this.lengthInput.value);
       if (!Number.isFinite(raw)) return;
-      // In seconds mode the user types seconds; convert to whole frames since the
-      // backend pipeline is frame-based. Round so 0.5s @ 24fps → 12 frames.
+      
       const frames = Math.max(
         MIN_SEGMENT_LENGTH,
         Math.round(this.isSecondsMode() ? raw * this.getFps() : raw),
       );
-      // Snapshot pre-edit state on the first keystroke so 20→30→20 reverts cleanly.
       if (!this._inputBaseline) {
         this._inputBaseline = this.timeline.segments.map(s => s.length);
       }
@@ -279,19 +259,46 @@ class TimelineEditor {
       const prev = this.maxFramesWidget.callback;
       this.maxFramesWidget.callback = (...args) => {
         prev?.apply(this.maxFramesWidget, args);
+        if (this.secondsWidget && this.fpsWidget) {
+          this.secondsWidget.value = parseFloat((this.maxFramesWidget.value / this.fpsWidget.value).toFixed(3));
+        }
         this.trimToFit();
         this.commit();
         this.updateUIFromSelection();
         this.render();
       };
     }
-    // fps and time_units only affect display — re-render and refresh the editable readouts
-    // (length input, total label) so the active units stay in sync with the widget values.
-    for (const w of [this.fpsWidget, this.timeUnitsWidget]) {
-      if (!w) continue;
-      const prev = w.callback;
-      w.callback = (...args) => {
-        prev?.apply(w, args);
+
+    if (this.secondsWidget) {
+      const prev = this.secondsWidget.callback;
+      this.secondsWidget.callback = (...args) => {
+        prev?.apply(this.secondsWidget, args);
+        if (this.maxFramesWidget && this.fpsWidget) {
+          this.maxFramesWidget.value = Math.max(1, Math.round(this.secondsWidget.value * this.fpsWidget.value));
+          this.trimToFit();
+          this.commit();
+        }
+        this.updateUIFromSelection();
+        this.render();
+      };
+    }
+
+    if (this.fpsWidget) {
+      const prev = this.fpsWidget.callback;
+      this.fpsWidget.callback = (...args) => {
+        prev?.apply(this.fpsWidget, args);
+        if (this.secondsWidget && this.maxFramesWidget) {
+          this.secondsWidget.value = parseFloat((this.maxFramesWidget.value / this.fpsWidget.value).toFixed(3));
+        }
+        this.updateUIFromSelection();
+        this.render();
+      };
+    }
+
+    if (this.timeUnitsWidget) {
+      const prev = this.timeUnitsWidget.callback;
+      this.timeUnitsWidget.callback = (...args) => {
+        prev?.apply(this.timeUnitsWidget, args);
         this.updateUIFromSelection();
         this.render();
       };
@@ -304,8 +311,6 @@ class TimelineEditor {
 
   resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
-    // offsetWidth is the canvas's CSS pixel size (ignores LiteGraph's zoom transform);
-    // getBoundingClientRect would return post-transform pixels and break hit-testing math.
     const w = Math.max(50, Math.floor(this.canvas.offsetWidth));
     this.canvas.width = w * dpr;
     this.canvas.height = CANVAS_HEIGHT * dpr;
@@ -314,14 +319,10 @@ class TimelineEditor {
     this.render();
   }
 
-  // ─── Layout ───
-
   pxPerFrame() {
     return this._cssWidth / this.getMaxFrames();
   }
 
-  // Layout: by default uses the visual (effective) order, which matches the natural array
-  // order except during an active reorder, where the dragged segment previews at targetIdx.
   segmentRects(order) {
     const segs = this.timeline.segments;
     const ord = order ?? this._getEffectiveOrder();
@@ -346,9 +347,6 @@ class TimelineEditor {
     return order;
   }
 
-  // Pick the target slot whose source-slot center is closest to where the dragged block's
-  // center is currently rendered. This makes swaps trigger based on the block's visible
-  // overlap (not raw cursor position), so dragOffset and segment-size differences feel natural.
   _computeReorderTarget() {
     const ppf = this.pxPerFrame();
     const sourceIdx = this.reorder.sourceIdx;
@@ -391,11 +389,8 @@ class TimelineEditor {
     return -1;
   }
 
-  // ─── Pointer ───
-
   onPointerDown(e) {
     const { x, y } = this.localPos(e);
-    // Any new interaction interrupts a post-reorder settle animation.
     this._settling = false;
     const handle = this.hitBoundary(x);
     if (handle >= 0) {
@@ -413,7 +408,6 @@ class TimelineEditor {
       this.selectedIndex = block;
       this.updateUIFromSelection();
       this.render();
-      // dragOffsetPx = where inside the block we clicked, so the block follows the cursor at that offset.
       const sourceX = this._displayedX.get(block) ?? 0;
       this.reorder = {
         sourceIdx: block, targetIdx: block,
@@ -453,7 +447,6 @@ class TimelineEditor {
       if (this.reorder.active) {
         this.reorder.cursorX = x;
         this.reorder.targetIdx = this._computeReorderTarget();
-        // Render every move so the dragged block tracks the cursor in real time.
         this.render();
         return;
       }
@@ -481,8 +474,6 @@ class TimelineEditor {
         this.canvas.style.cursor = "default";
         const { sourceIdx, targetIdx } = this.reorder;
         if (sourceIdx !== targetIdx) {
-          // Remap displayed positions so segments visually stay where they were on release.
-          // After splice, segment at new index `i` is timeline.segments[effectiveOrder[i]] (pre-splice).
           const effective = this._getEffectiveOrder();
           const oldDisplayed = new Map(this._displayedX);
           const seg = this.timeline.segments.splice(sourceIdx, 1)[0];
@@ -495,7 +486,7 @@ class TimelineEditor {
           this.selectedIndex = targetIdx;
           this.commit();
           this.updateUIFromSelection();
-          this._settling = true;  // lerp the dragged block from cursor pos to its final slot
+          this._settling = true; 
         }
       }
       this.reorder = null;
@@ -505,7 +496,6 @@ class TimelineEditor {
 
   localPos(e) {
     const rect = this.canvas.getBoundingClientRect();
-    // rect is post-CSS-transform; divide by the on-screen-to-CSS scale to get logical coords.
     const sx = (rect.width / this.canvas.offsetWidth) || 1;
     const sy = (rect.height / this.canvas.offsetHeight) || 1;
     return {
@@ -514,21 +504,17 @@ class TimelineEditor {
     };
   }
 
-  // ─── Mutations ───
-
   addSegment() {
     const max = this.getMaxFrames();
     const n = this.timeline.segments.length;
-    // Refuse only when truly impossible — every segment (incl. the new one) at MIN won't fit.
     if (max < (n + 1) * MIN_SEGMENT_LENGTH) return;
 
     const desired = Math.max(MIN_SEGMENT_LENGTH, Math.floor(max / (n + 1)));
     const newIdx = n;
     const usedColors = new Set(this.timeline.segments.map(s => s.color));
     this.timeline.segments.push({ prompt: "", length: desired, color: pickColor(usedColors) });
-    this.trimToFit(newIdx);  // shrink other segments to fit; protect the new one
+    this.trimToFit(newIdx); 
 
-    // If still over (e.g., desired itself was too big), shrink the new one down to its slack.
     let total = this.timeline.segments.reduce((a, s) => a + s.length, 0);
     if (total > max) {
       this.timeline.segments[newIdx].length -= (total - max);
@@ -541,7 +527,6 @@ class TimelineEditor {
     this.render();
   }
 
-  // Max length segment `idx` can be without pushing total past max_frames.
   maxLengthFor(idx) {
     const max = this.getMaxFrames();
     let others = 0;
@@ -551,9 +536,6 @@ class TimelineEditor {
     return Math.max(MIN_SEGMENT_LENGTH, max - others);
   }
 
-  // Reset all lengths to `baseline`, set segment `idx` to `newLen`, then borrow from
-  // subsequent segments (one at a time, down to MIN) if the total exceeds max_frames.
-  // Used by both boundary drag and the length input so they share identical semantics.
   _setLengthShifting(idx, newLen, baseline) {
     const segs = this.timeline.segments;
     const max = this.getMaxFrames();
@@ -569,9 +551,6 @@ class TimelineEditor {
     if (total > max) segs[idx].length -= (total - max);
   }
 
-  // Trim segments from the end (then second-to-last, etc.) until total fits max_frames.
-  // protectIndex (optional): a segment to leave alone (e.g. the segment we just added).
-  // Caller is responsible for committing afterward.
   trimToFit(protectIndex = -1) {
     const max = this.getMaxFrames();
     let total = this.timeline.segments.reduce((a, s) => a + s.length, 0);
@@ -585,8 +564,6 @@ class TimelineEditor {
     }
   }
 
-  // Spread segment lengths evenly across max_frames; leftover frames go to the first segments
-  // so the total exactly equals max_frames (when feasible).
   distributeEvenly() {
     const max = this.getMaxFrames();
     const n = this.timeline.segments.length;
@@ -611,8 +588,6 @@ class TimelineEditor {
     this.render();
   }
 
-  // ─── Persistence ───
-
   commit() {
     this.syncWidgetsFromTimeline();
     this.node.graph?.setDirtyCanvas?.(true, true);
@@ -625,10 +600,6 @@ class TimelineEditor {
     if (this.segmentLengthsWidget) this.segmentLengthsWidget.value = segs.map(s => s.length).join(", ");
   }
 
-  // ─── UI sync ───
-
-  // Value to put in the length <input> for a given frame count, formatted in active units.
-  // Seconds mode shows up to 3 decimals (trimmed) so 1-frame steps are visible at any fps.
   lengthInputValueFor(frames) {
     if (!this.isSecondsMode()) return String(frames);
     return (frames / this.getFps()).toFixed(3).replace(/\.?0+$/, "");
@@ -643,10 +614,8 @@ class TimelineEditor {
       if (this.textarea.value !== seg.prompt) this.textarea.value = seg.prompt;
       this.lengthInput.value = this.lengthInputValueFor(seg.length);
     }
-    // Step the input by 1 frame's worth so spinner clicks/arrow keys move sensibly in either mode.
     this.lengthInput.step = this.isSecondsMode() ? (1 / this.getFps()).toFixed(4) : "1";
     this.lengthInput.min = this.isSecondsMode() ? (MIN_SEGMENT_LENGTH / this.getFps()).toFixed(4) : MIN_SEGMENT_LENGTH;
-    // Programmatic value change invalidates any in-progress baseline.
     this._inputBaseline = null;
     this.updateTotalLabel();
   }
@@ -663,27 +632,20 @@ class TimelineEditor {
     }
   }
 
-  // ─── Render ───
-
   render() {
-    // Compute target X for each segment from the effective (preview) order.
     const rects = this.segmentRects();
     this._targetX = new Map();
     for (const r of rects) this._targetX.set(r.index, r.x);
 
     if (this.reorder?.active) {
-      // The dragged segment follows the cursor in real time (no lerp). Other segments
-      // lerp toward their preview-order slots.
       const sourceIdx = this.reorder.sourceIdx;
       const sourcePos = this.reorder.cursorX - this.reorder.dragOffsetPx;
       this._targetX.set(sourceIdx, sourcePos);
       this._displayedX.set(sourceIdx, sourcePos);
       this._kickAnim();
     } else if (this._settling) {
-      // Post-release: lerp displayed positions toward their final slots without snapping.
       this._kickAnim();
     } else {
-      // All other state changes (boundary drag, add/delete, length input, resize) snap.
       for (const [idx, target] of this._targetX) this._displayedX.set(idx, target);
       this._draw();
     }
@@ -710,11 +672,9 @@ class TimelineEditor {
       }
     }
     this._draw();
-    // Keep ticking only while there's lerp work to do — render() will re-kick when targets change.
     if (needsMore) {
       this._animRaf = requestAnimationFrame(() => this._tick());
     } else if (!this.reorder?.active) {
-      // Animation has converged and no reorder is in progress — clear settling flag.
       this._settling = false;
     }
   }
@@ -735,9 +695,6 @@ class TimelineEditor {
     const ppf = this.pxPerFrame();
     const targetLabelSpacing = 60;
 
-    // Pick a tick step. Seconds-mode chooses a "nice" duration in seconds and converts to
-    // frames so ticks land on whole-second boundaries when fps is integer; frames-mode
-    // uses the original frame-count nice list.
     let step;
     if (this.isSecondsMode()) {
       const fps = this.getFps();
@@ -766,7 +723,6 @@ class TimelineEditor {
       ctx.stroke();
       ctx.fillText(this.formatTime(f), x + 2, 2);
     }
-    // Final tick at max if not aligned
     const xMax = Math.floor(max * ppf) - 0.5;
     ctx.strokeStyle = "#666";
     ctx.beginPath();
@@ -780,11 +736,9 @@ class TimelineEditor {
     const blockY = RULER_HEIGHT + 2;
     const blockH = BLOCK_HEIGHT - 4;
 
-    // Empty timeline background
     ctx.fillStyle = "#101010";
     ctx.fillRect(0, blockY, w, blockH);
 
-    // Render in two passes so the dragged segment is on top during reorder.
     const dragIdx = this.reorder?.active ? this.reorder.sourceIdx : -1;
     const rendered = [...rects].sort((a, b) => (a.index === dragIdx ? 1 : 0) - (b.index === dragIdx ? 1 : 0));
 
@@ -807,7 +761,6 @@ class TimelineEditor {
       ctx.lineWidth = isDragging || isSelected ? 2 : 1;
       ctx.strokeRect(drawX + 0.5, blockY + 0.5, drawW - 1, blockH - 1);
 
-      // Label: prompt (wrapped to 2 lines) + frame range
       ctx.fillStyle = "#fff";
       ctx.font = "11px sans-serif";
       ctx.textBaseline = "top";
@@ -823,7 +776,6 @@ class TimelineEditor {
       ctx.fillText(rangeTrunc, drawX + 4, blockY + blockH - 14);
     }
 
-    // Boundary handles (visible cue) — hidden during reorder since they're not interactive then.
     if (!this.reorder?.active) {
       for (let i = 0; i < rects.length; i++) {
         const r = rects[i];
@@ -847,11 +799,10 @@ class TimelineEditor {
     return lo > 0 ? text.slice(0, lo) + "…" : "";
   }
 
-  // Greedy word wrap to at most two lines; line 2 ellipsizes if it still overflows.
   wrapTwoLines(ctx, text, maxWidth) {
     if (ctx.measureText(text).width <= maxWidth) return [text, ""];
 
-    const tokens = text.split(/(\s+)/);  // alternating words and whitespace
+    const tokens = text.split(/(\s+)/); 
     let line1 = "";
     let consumed = 0;
     for (let i = 0; i < tokens.length; i++) {
@@ -861,7 +812,6 @@ class TimelineEditor {
       consumed = i + 1;
     }
 
-    // First word is wider than maxWidth — fall back to char-level ellipsis on one line.
     if (!line1.trim()) return [this.truncateText(ctx, text, maxWidth), ""];
 
     let line2 = tokens.slice(consumed).join("").trim();
@@ -878,17 +828,13 @@ class TimelineEditor {
     if (this._textCommitTimer) {
       clearTimeout(this._textCommitTimer);
       this._textCommitTimer = null;
-      // Best-effort flush so an in-flight prompt edit doesn't disappear if the user
-      // removes the node mid-typing (commit is a no-op if widgets are gone).
       try { this.commit(); } catch (_) {}
     }
   }
 }
 
-// Workflows saved before fps/time_units existed restore with a shorter widgets_values
-// array, leaving the new widgets at null / "". ComfyUI's input validator then rejects ""
-// for the Float fps input — restore schema defaults on configure.
-const APPENDED_WIDGET_DEFAULTS = [["fps", 24.0], ["time_units", "frames"]];
+// Menambahkan default untuk seconds agar node lama yang belum punya tidak error
+const APPENDED_WIDGET_DEFAULTS = [["fps", 24.0], ["seconds", 5.375], ["time_units", "seconds"]];
 
 app.registerExtension({
   name: "PromptRelay.Timeline",
@@ -912,7 +858,6 @@ app.registerExtension({
         getHeight: () => 220,
       });
 
-      // Defer construction until widgets are settled (configure runs after onNodeCreated for saved nodes)
       const self = this;
       setTimeout(() => {
         try {
@@ -935,9 +880,12 @@ app.registerExtension({
           const w = this.widgets.find(x => x.name === name);
           if (w && (w.value == null || w.value === "")) w.value = def;
         }
-        // Rebuild from restored widget values
+        
         setTimeout(() => {
           if (this._timelineEditor) {
+            if (this._timelineEditor.secondsWidget && this._timelineEditor.fpsWidget && this._timelineEditor.maxFramesWidget) {
+                this._timelineEditor.secondsWidget.value = parseFloat((this._timelineEditor.maxFramesWidget.value / this._timelineEditor.fpsWidget.value).toFixed(3));
+            }
             this._timelineEditor.timeline = parseInitial(
               this._timelineEditor.timelineDataWidget?.value,
               this._timelineEditor.getMaxFrames(),
