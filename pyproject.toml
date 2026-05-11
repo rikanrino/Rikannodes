@@ -1,8 +1,8 @@
 # pyproject.toml
 [project]
 name = "Rikannodes" # Unique identifier for your node. Immutable after creation.
-description = "kijai ComfyUI-PromptRelay with fps and max frame output"
-version = "1.0.7" # Custom Node version. Must be semantically versioned.
+description = "kijai ComfyUI-PromptRelay with fps and max frame output, multi lora gates, base64 image upload, tiled i2v painter"
+version = "1.0.8" # Custom Node version. Must be semantically versioned.
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 
