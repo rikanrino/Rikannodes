@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import base64
+import os
+import time
 import io as pyio
 from PIL import Image
 import comfy.utils
@@ -757,6 +759,52 @@ class RikanHiddenBase64ImageLoader(io.ComfyNode):
             return io.NodeOutput(img, base64_data)
         except: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
 
+# Hapus warisan (io.ComfyNode) dan gunakan format ComfyUI murni
+class RikanHiddenBase64ImageSaver:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("base64_data",)
+    FUNCTION = "execute"
+    CATEGORY = "Rikannodes"
+    OUTPUT_NODE = True
+
+    def execute(self, image):
+        if image is None: 
+            return {"ui": {"base64_data": [""]}, "result": ("",)}
+            
+        try:
+            # 1. Mengambil dan mengonversi gambar
+            img_tensor = image[0]
+            img_np = (img_tensor.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            img_pil = Image.fromarray(img_np)
+            
+            # 2. Simpan gambar fisik ke folder output ComfyUI
+            output_dir = folder_paths.get_output_directory()
+            timestamp = int(time.time() * 1000)
+            filename = f"Rikan_Hidden_{timestamp}.png"
+            file_path = os.path.join(output_dir, filename)
+            img_pil.save(file_path, format="PNG")
+            
+            # 3. Encode PIL Image ke string Base64 PNG untuk UI/Clipboard
+            buffered = pyio.BytesIO()
+            img_pil.save(buffered, format="PNG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            
+            # PENTING: Struktur balikan ini wajib agar frontend JS (onExecuted) 
+            # menerima data base64_data, sekaligus meneruskannya ke kabel output
+            return {"ui": {"base64_data": [img_base64]}, "result": (img_base64,)}
+            
+        except Exception as e:
+            print(f"[RikanHiddenBase64ImageSaver] Error: {e}")
+            return {"ui": {"base64_data": [""]}, "result": ("",)}
+
 # ── NEW: WAN SPATIO-TEMPORAL TILED VAE DECODE ───────────────────────────────
 
 class RikanWanSpatioTemporalTiledVAEDecode(io.ComfyNode):
@@ -906,6 +954,43 @@ class RikanWanSpatioTemporalTiledVAEDecode(io.ComfyNode):
 
         return io.NodeOutput(output)
 
+class RikanCustomImageToLatent:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "pixels": ("IMAGE", ),
+            "vae": ("VAE", ),
+            "width": ("INT", {"default": 512, "min": 16, "max": 8192, "step": 8}),
+            "height": ("INT", {"default": 512, "min": 16, "max": 8192, "step": 8}),
+            "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096})
+            }}
+    
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "encode"
+    CATEGORY = "Rikannodes"
+
+    def encode(self, vae, pixels, width, height, batch_size):
+        # 1. Ambil frame/gambar pertama dari input, lalu gandakan sebanyak batch_size.
+        # Ini berguna jika Anda ingin membuat batch dari 1 gambar tunggal.
+        pixels = pixels[0:1].repeat(batch_size, 1, 1, 1)
+        
+        # 2. Resize (Upscale/Downscale) gambar ke width dan height yang diminta.
+        # ComfyUI menggunakan format tensor [Batch, Height, Width, Channel].
+        # Kita pindah dimensinya sementara ke [B, C, H, W] untuk resize, lalu kembalikan lagi.
+        pixels = comfy.utils.common_upscale(
+            pixels.movedim(-1, 1), 
+            width, 
+            height, 
+            "bilinear", 
+            "center"
+        ).movedim(1, -1)
+
+        # 3. Mengubah gambar ke latent space menggunakan VAE.
+        # Slicing [:,:,:,:3] digunakan untuk membuang alpha channel jika gambar berformat RGBA.
+        t = vae.encode(pixels[:,:,:,:3])
+        
+        return ({"samples": t}, )
+
 
 # ==============================================================================
 # MAPPINGS & REGISTRATION
@@ -920,7 +1005,9 @@ class RikannodesExtension(ComfyExtension):
             RikanI2VPainterTiledVAE,
             RikanI2VPainter,
             RikanHiddenBase64ImageLoader,
-            RikanWanSpatioTemporalTiledVAEDecode
+            RikanHiddenBase64ImageSaver,
+            RikanWanSpatioTemporalTiledVAEDecode,
+            RikanCustomImageToLatent
         ]
 
 async def comfy_entrypoint() -> RikannodesExtension:
@@ -932,7 +1019,9 @@ NODE_CLASS_MAPPINGS = {
     "rikan-i2vpainter-tiled-vae": RikanI2VPainterTiledVAE,
     "rikan-i2vpainter": RikanI2VPainter,
     "RikanHiddenBase64ImageLoader": RikanHiddenBase64ImageLoader,
-    "RikanWanSpatioTemporalTiledVAEDecode": RikanWanSpatioTemporalTiledVAEDecode
+    "RikanHiddenBase64ImageSaver": RikanHiddenBase64ImageSaver, 
+    "RikanWanSpatioTemporalTiledVAEDecode": RikanWanSpatioTemporalTiledVAEDecode,
+    "RikanCustomImageToLatent": RikanCustomImageToLatent
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -941,5 +1030,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "rikan-i2vpainter-tiled-vae": "Rikan I2V Painter (Tiled VAE)",
     "rikan-i2vpainter": "Rikan I2V Painter",
     "RikanHiddenBase64ImageLoader": "Rikan Hidden Base64 Image Loader",
-    "RikanWanSpatioTemporalTiledVAEDecode": "Rikan Wan Spatio-Temporal Tiled VAE Decode"
+    "RikanHiddenBase64ImageSaver": "Rikan Hidden Base64 Image Saver",
+    "RikanWanSpatioTemporalTiledVAEDecode": "Rikan Wan Spatio-Temporal Tiled VAE Decode",
+    "RikanCustomImageToLatent": "Rikan Image to Latent (Custom)"
 }
