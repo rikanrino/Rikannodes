@@ -9,17 +9,10 @@ app.registerExtension({
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
-                this.show_custom_image = false;
-                this.custom_image_element = null;
-
+                // 1. Setup UI Textbox Base64
                 const base64Widget = this.widgets.find((w) => w.name === "base64_data");
                 if (base64Widget) {
-                    // Memberikan ruang 85px di LiteGraph (60px untuk text area + 25px untuk margin bawah)
-                    base64Widget.computeSize = function() {
-                        return [this.width || 200, 85];
-                    };
-                    
-                    // Tinggi elemen fisik tetap 60px agar rapi
+                    base64Widget.computeSize = function() { return [this.width || 200, 85]; };
                     if (base64Widget.inputEl) {
                         base64Widget.inputEl.style.setProperty("height", "60px", "important");
                         base64Widget.inputEl.style.setProperty("max-height", "60px", "important");
@@ -31,6 +24,7 @@ app.registerExtension({
                     }
                 }
 
+                // 2. Setup Upload File
                 const fileInput = document.createElement("input");
                 fileInput.type = "file";
                 fileInput.accept = "image/*";
@@ -42,99 +36,53 @@ app.registerExtension({
                     if (file) {
                         const reader = new FileReader();
                         reader.onload = (event) => {
-                            const dataUri = event.target.result;
-                            const rawBase64 = dataUri.split(',')[1];
-                            
-                            if (base64Widget) {
-                                base64Widget.value = rawBase64;
-                            }
-                            
-                            this.custom_image_element = new Image();
-                            this.custom_image_element.src = dataUri; 
-                            this.custom_image_element.onload = () => {
-                                this.size[1] = this.computeSize()[1];
-                                this.setDirtyCanvas(true, true);
-                            };
+                            const rawBase64 = event.target.result.split(',')[1];
+                            if (base64Widget) base64Widget.value = rawBase64;
                         };
                         reader.readAsDataURL(file);
                     }
                 });
 
-                this.addWidget("button", "Upload Image", "upload", () => {
+                this.addWidget("button", "Upload Image (Local Blob)", "upload", () => {
                     fileInput.click();
                 });
 
-                requestAnimationFrame(() => {
-                    this.size[1] = this.computeSize()[1];
-                    this.setDirtyCanvas(true, true);
-                });
-
-                setTimeout(() => {
+                // 3. Tombol Popup View
+                this.addWidget("button", "🔍 View Decoded Image", "view", () => {
                     if (base64Widget && base64Widget.value) {
-                        this.custom_image_element = new Image();
-                        this.custom_image_element.src = "data:image/png;base64," + base64Widget.value;
-                        this.custom_image_element.onload = () => {
-                            this.setDirtyCanvas(true, true);
-                        };
+                        // Jalankan fungsi popup dari dalam
+                        let cleanB64 = base64Widget.value;
+                        if (cleanB64.includes(",")) cleanB64 = cleanB64.split(",")[1];
+                        
+                        const overlay = document.createElement("div");
+                        overlay.style.cssText = "position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10000; display: flex; justify-content: center; align-items: center;";
+                        
+                        const modal = document.createElement("div");
+                        modal.style.cssText = "background: #222; padding: 20px; border-radius: 10px; display: flex; flex-direction: column; align-items: center; max-width: 90vw; max-height: 90vh; box-shadow: 0 10px 25px rgba(0,0,0,0.8);";
+                        modal.onclick = (e) => e.stopPropagation();
+
+                        const img = document.createElement("img");
+                        img.src = "data:image/png;base64," + cleanB64;
+                        img.style.cssText = "max-width: 100%; max-height: 70vh; object-fit: contain; background: #000; border: 1px solid #444; border-radius: 6px;";
+                        modal.appendChild(img);
+
+                        const closeBtn = document.createElement("button");
+                        closeBtn.innerText = "Close & Clear Memory";
+                        closeBtn.style.cssText = "margin-top: 15px; padding: 10px; background: #ef4444; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; font-size: 14px;";
+                        
+                        const destroyPopup = () => { img.src = ""; overlay.remove(); };
+                        closeBtn.onclick = destroyPopup;
+                        overlay.onclick = destroyPopup;
+
+                        modal.appendChild(closeBtn);
+                        overlay.appendChild(modal);
+                        document.body.appendChild(overlay);
+                    } else {
+                        alert("The form is empty. Please paste a Base64 string or upload an image first.");
                     }
-                }, 100);
+                });
 
                 return r;
-            };
-
-            const getExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
-            nodeType.prototype.getExtraMenuOptions = function (_, options) {
-                if (getExtraMenuOptions) {
-                    getExtraMenuOptions.apply(this, arguments);
-                }
-
-                options.unshift({
-                    content: this.show_custom_image ? "Hide Image" : "Show Image",
-                    callback: () => {
-                        this.show_custom_image = !this.show_custom_image;
-                        
-                        if (!this.show_custom_image) {
-                            this.size[1] = this.computeSize()[1];
-                        }
-                        
-                        this.setDirtyCanvas(true, true);
-                    }
-                });
-            };
-
-            const onDrawForeground = nodeType.prototype.onDrawForeground;
-            nodeType.prototype.onDrawForeground = function (ctx) {
-                if (onDrawForeground) {
-                    onDrawForeground.apply(this, arguments);
-                }
-
-                if (this.show_custom_image && this.custom_image_element) {
-                    const padding = 10;
-                    const w = this.size[0] - padding * 2;
-                    
-                    let y = 30; 
-                    
-                    const btnWidget = this.widgets ? this.widgets.find(w => w.name === "upload" || w.type === "button") : null;
-                    if (btnWidget && btnWidget.last_y) {
-                        y = btnWidget.last_y + 30; 
-                    } else if (this.widgets && this.widgets.length > 0) {
-                        y = this.widgets[this.widgets.length - 1].last_y + 30;
-                    }
-
-                    const imgW = this.custom_image_element.width;
-                    const imgH = this.custom_image_element.height;
-                    
-                    const scale = w / imgW; 
-                    const drawW = w;
-                    const drawH = imgH * scale;
-
-                    ctx.drawImage(this.custom_image_element, padding, y, drawW, drawH);
-                    
-                    const requiredHeight = y + drawH + padding;
-                    if (this.size[1] < requiredHeight) {
-                        this.size[1] = requiredHeight;
-                    }
-                }
             };
         }
     }
