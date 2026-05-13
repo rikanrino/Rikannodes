@@ -2,7 +2,7 @@
 [project]
 name = "Rikannodes" # Unique identifier for your node. Immutable after creation.
 description = "kijai ComfyUI-PromptRelay with fps and max frame output, multi lora gates, base64 image upload, base64 image save, tiled i2v painter wan encode, spatio vae decode, qwen custom image size for consistency."
-version = "1.2.0" # Custom Node version. Must be semantically versioned.
+version = "1.2.1" # Custom Node version. Must be semantically versioned.
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 
