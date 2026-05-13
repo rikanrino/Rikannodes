@@ -738,31 +738,44 @@ class RikanI2VPainter(io.ComfyNode):
         return io.NodeOutput(positive, negative, positive_original, negative_original, out_latent)
 
 
-class RikanHiddenBase64ImageLoader(io.ComfyNode):
+class RikanHiddenBase64ImageLoader:
     @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="RikanHiddenBase64ImageLoader",
-            display_name="Rikan Hidden Base64 Image Loader",
-            category="Rikannodes",
-            inputs=[io.String.Input("base64_data", multiline=True, default="")],
-            outputs=[io.Image.Output(display_name="image"), io.String.Output(display_name="raw_base64")]
-        )
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "base64_data": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "raw_base64")
+    FUNCTION = "execute"
+    CATEGORY = "Rikannodes"
 
-    @classmethod
-    def execute(cls, base64_data) -> io.NodeOutput:
-        if not base64_data: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
+    def execute(self, base64_data):
+        if not base64_data or base64_data.strip() == "":
+            return (torch.zeros((1, 64, 64, 3)), "")
+        
         try:
-            if "," in base64_data: base64_data = base64_data.split(",")[1]
-            img = Image.open(pyio.BytesIO(base64.b64decode(base64_data))).convert("RGB")
-            img = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
-            return io.NodeOutput(img, base64_data)
-        except: return io.NodeOutput(torch.zeros((1, 64, 64, 3)), "")
+            # Membersihkan header jika ada (misal: data:image/png;base64,...)
+            if "," in base64_data:
+                base64_data = base64_data.split(",")[1]
+            
+            img_bytes = base64.b64decode(base64_data)
+            img = Image.open(pyio.BytesIO(img_bytes)).convert("RGB")
+            
+            # Konversi ke tensor ComfyUI
+            img_np = np.array(img).astype(np.float32) / 255.0
+            img_tensor = torch.from_numpy(img_np)[None,]
+            
+            return (img_tensor, base64_data)
+        except Exception as e:
+            print(f"[RikanLoader] Error: {e}")
+            return (torch.zeros((1, 64, 64, 3)), "")
 
-# Hapus warisan (io.ComfyNode) dan gunakan format ComfyUI murni
 class RikanHiddenBase64ImageSaver:
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(s):
         return {
             "required": {
                 "image": ("IMAGE",),
@@ -773,36 +786,27 @@ class RikanHiddenBase64ImageSaver:
     RETURN_NAMES = ("base64_data",)
     FUNCTION = "execute"
     CATEGORY = "Rikannodes"
-    OUTPUT_NODE = True
+    OUTPUT_NODE = True # Wajib agar node tetap jalan tanpa kabel output
 
     def execute(self, image):
         if image is None: 
             return {"ui": {"base64_data": [""]}, "result": ("",)}
             
         try:
-            # 1. Mengambil dan mengonversi gambar
+            # Ambil frame pertama
             img_tensor = image[0]
             img_np = (img_tensor.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
             img_pil = Image.fromarray(img_np)
             
-            # 2. Simpan gambar fisik ke folder output ComfyUI
-            output_dir = folder_paths.get_output_directory()
-            timestamp = int(time.time() * 1000)
-            filename = f"Rikan_Hidden_{timestamp}.png"
-            file_path = os.path.join(output_dir, filename)
-            img_pil.save(file_path, format="PNG")
-            
-            # 3. Encode PIL Image ke string Base64 PNG untuk UI/Clipboard
+            # Encode ke Base64 di memori (Tanpa simpan file)
             buffered = pyio.BytesIO()
             img_pil.save(buffered, format="PNG")
             img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
             
-            # PENTING: Struktur balikan ini wajib agar frontend JS (onExecuted) 
-            # menerima data base64_data, sekaligus meneruskannya ke kabel output
+            # Kirim ke UI (JavaScript) dan ke Output kabel
             return {"ui": {"base64_data": [img_base64]}, "result": (img_base64,)}
-            
         except Exception as e:
-            print(f"[RikanHiddenBase64ImageSaver] Error: {e}")
+            print(f"[RikanSaver] Error: {e}")
             return {"ui": {"base64_data": [""]}, "result": ("",)}
 
 # ── NEW: WAN SPATIO-TEMPORAL TILED VAE DECODE ───────────────────────────────
@@ -954,42 +958,96 @@ class RikanWanSpatioTemporalTiledVAEDecode(io.ComfyNode):
 
         return io.NodeOutput(output)
 
-class RikanCustomImageToLatent:
+from comfy_api.latest import io
+import torch
+import comfy.utils
+
+class RikanQwenCustomImageSize(io.ComfyNode):
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-            "pixels": ("IMAGE", ),
-            "vae": ("VAE", ),
-            "width": ("INT", {"default": 512, "min": 16, "max": 8192, "step": 8}),
-            "height": ("INT", {"default": 512, "min": 16, "max": 8192, "step": 8}),
-            "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096})
-            }}
-    
-    RETURN_TYPES = ("LATENT",)
-    FUNCTION = "encode"
-    CATEGORY = "Rikannodes"
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanQwenCustomImageSize",
+            display_name="Rikan Qwen Custom Image Size",
+            category="Rikannodes",
+            inputs=[
+                io.Image.Input("pixels"),
+                io.Vae.Input("vae"),
+                io.String.Input("text", multiline=True, default=""),
+                
+                # Menambahkan opsi Zoom Out
+                io.Combo.Input("resize_mode", options=["Crop to Fit", "Generative Fill", "Zoom Out"], default="Crop to Fit"),
+                io.Combo.Input("prompt_theme", options=["Technical Precision", "Artistic Continuity"], default="Technical Precision"),
+                
+                io.Combo.Input("resolution_preset", options=["Custom", "512p (SD 1.5)", "720p (HD)", "1080p (FHD)", "1024p (SDXL)"], default="720p (HD)"),
+                io.Combo.Input("orientation", options=["Horizontal (Landscape)", "Vertical (Portrait)", "Square (1:1)"], default="Horizontal (Landscape)"),
+                io.Int.Input("custom_width", default=1280, min=16, max=8192, step=8),
+                io.Int.Input("custom_height", default=720, min=16, max=8192, step=8),
+                io.Int.Input("batch_size", default=1, min=1, max=4096)
+            ],
+            outputs=[
+                io.Latent.Output(display_name="latent"),
+                io.String.Output(display_name="combined_prompt")
+            ]
+        )
 
-    def encode(self, vae, pixels, width, height, batch_size):
-        # 1. Ambil frame/gambar pertama dari input, lalu gandakan sebanyak batch_size.
-        # Ini berguna jika Anda ingin membuat batch dari 1 gambar tunggal.
-        pixels = pixels[0:1].repeat(batch_size, 1, 1, 1)
-        
-        # 2. Resize (Upscale/Downscale) gambar ke width dan height yang diminta.
-        # ComfyUI menggunakan format tensor [Batch, Height, Width, Channel].
-        # Kita pindah dimensinya sementara ke [B, C, H, W] untuk resize, lalu kembalikan lagi.
-        pixels = comfy.utils.common_upscale(
-            pixels.movedim(-1, 1), 
-            width, 
-            height, 
-            "bilinear", 
-            "center"
-        ).movedim(1, -1)
+    @classmethod
+    def execute(cls, pixels, vae, text, resize_mode, prompt_theme, resolution_preset, orientation, custom_width, custom_height, batch_size) -> io.NodeOutput:
+        # Menentukan resolusi kanvas target
+        if resolution_preset == "Custom":
+            w, h = custom_width, custom_height
+        else:
+            if resolution_preset == "512p (SD 1.5)": base_long, base_short = 768, 512
+            elif resolution_preset == "720p (HD)": base_long, base_short = 1280, 720
+            elif resolution_preset == "1080p (FHD)": base_long, base_short = 1920, 1080
+            elif resolution_preset == "1024p (SDXL)": base_long, base_short = 1344, 768
+            
+            if orientation == "Horizontal (Landscape)": w, h = base_long, base_short
+            elif orientation == "Vertical (Portrait)": w, h = base_short, base_long
+            else: w, h = base_short, base_short
 
-        # 3. Mengubah gambar ke latent space menggunakan VAE.
-        # Slicing [:,:,:,:3] digunakan untuk membuang alpha channel jika gambar berformat RGBA.
-        t = vae.encode(pixels[:,:,:,:3])
+        w, h = (w // 8) * 8, (h // 8) * 8
+        pixels_batch = pixels[0:1].repeat(batch_size, 1, 1, 1)
+        B, orig_H, orig_W, C = pixels_batch.shape
+
+        if resize_mode == "Crop to Fit":
+            pixels_processed = comfy.utils.common_upscale(pixels_batch.movedim(-1, 1), w, h, "bilinear", "center").movedim(1, -1)
+            t = vae.encode(pixels_processed[:,:,:,:3])
+            return io.NodeOutput({"samples": t}, text)
         
-        return ({"samples": t}, )
+        else:
+            # Mode Generative Fill atau Zoom Out
+            base_scale = min(w / orig_W, h / orig_H)
+            
+            if resize_mode == "Zoom Out":
+                # Mengecilkan gambar asli menjadi 70% dari ukuran maksimalnya agar menyisakan ruang kosong di sekelilingnya
+                final_scale = base_scale * 0.70
+            else:
+                # Mode Generative Fill biasa: menyentuh tepi kanvas (fit to edge)
+                final_scale = base_scale
+            
+            new_W, new_H = round(orig_W * final_scale), round(orig_H * final_scale)
+            resized = comfy.utils.common_upscale(pixels_batch.movedim(-1, 1), new_W, new_H, "bilinear", "disabled").movedim(1, -1)
+            
+            canvas = torch.zeros((batch_size, h, w, C), device=pixels_batch.device, dtype=pixels_batch.dtype)
+            canvas.fill_(0.5) 
+            
+            y_off, x_off = (h - new_H) // 2, (w - new_W) // 2
+            canvas[:, y_off:y_off+new_H, x_off:x_off+new_W, :] = resized
+            t = vae.encode(canvas[:,:,:,:3])
+            
+            # --- Pembentukan Prompt Otomatis ---
+            if resize_mode == "Zoom Out":
+                action_desc = "perform a wide-angle zoom out"
+            else:
+                action_desc = "zoom out to match orientation"
+
+            if prompt_theme == "Technical Precision":
+                addon = f"Seamlessly {action_desc} while maintaining the central original image as an untouched anchor. Generate the top and bottom areas by extending existing textures and lighting, make it natural like it always the result if the original image was zoomed out. Zero distortion of original details."
+            else: # Artistic Continuity
+                addon = f"Seamlessly {action_desc} while perform a context-aware generative fill on the top and bottom empty spaces. Match the existing color grade, depth of field, and environmental theme perfectly. Ensure the new areas are a natural aesthetic continuation of the original image, make it natural like it always the result if the original image was zoomed out."
+            
+            final_prompt = f"{text}\n{addon}" if text.strip() != "" else addon
+            return io.NodeOutput({"samples": t}, final_prompt)
 
 
 # ==============================================================================
@@ -1007,7 +1065,7 @@ class RikannodesExtension(ComfyExtension):
             RikanHiddenBase64ImageLoader,
             RikanHiddenBase64ImageSaver,
             RikanWanSpatioTemporalTiledVAEDecode,
-            RikanCustomImageToLatent
+            RikanQwenCustomImageSize
         ]
 
 async def comfy_entrypoint() -> RikannodesExtension:
@@ -1021,7 +1079,7 @@ NODE_CLASS_MAPPINGS = {
     "RikanHiddenBase64ImageLoader": RikanHiddenBase64ImageLoader,
     "RikanHiddenBase64ImageSaver": RikanHiddenBase64ImageSaver, 
     "RikanWanSpatioTemporalTiledVAEDecode": RikanWanSpatioTemporalTiledVAEDecode,
-    "RikanCustomImageToLatent": RikanCustomImageToLatent
+    "RikanQwenCustomImageSize": RikanQwenCustomImageSize
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1032,5 +1090,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RikanHiddenBase64ImageLoader": "Rikan Hidden Base64 Image Loader",
     "RikanHiddenBase64ImageSaver": "Rikan Hidden Base64 Image Saver",
     "RikanWanSpatioTemporalTiledVAEDecode": "Rikan Wan Spatio-Temporal Tiled VAE Decode",
-    "RikanCustomImageToLatent": "Rikan Image to Latent (Custom)"
+    "RikanQwenCustomImageSize": "Rikan Qwen Custom Image Size"
 }
