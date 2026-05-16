@@ -2,7 +2,7 @@
 [project]
 name = "Rikannodes" # Unique identifier for your node. Immutable after creation.
 description = "Rikan Prompt Relay Encode (Timeline), Rikan Prompt Relay Multi LoRA Gate, Rikan I2V Painter (Tiled VAE), Rikan I2V Painter, Rikan Hidden Base64 Image Loader, Rikan Hidden Base64 Image Saver, Rikan Wan Spatio-Temporal Tiled VAE Decode, Rikan Qwen Custom Image Size, Rikan RTX Resolution Settings, Rikan Multi Lora Loader"
-version = "1.3.1" # Custom Node version. Must be semantically versioned.
+version = "1.3.2" # Custom Node version. Must be semantically versioned.
 license = { file = "LICENSE.txt" }
 dependencies  = [] # Filled in from requirements.txt
 
