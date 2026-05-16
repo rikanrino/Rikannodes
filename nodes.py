@@ -15,6 +15,11 @@ import node_helpers
 import comfy.model_management
 import comfy.ldm.modules.attention
 import json
+import server
+import hashlib
+import urllib.request
+import asyncio
+from aiohttp import web
 from comfy_api.latest import io, ComfyExtension
 from typing_extensions import override
 
@@ -958,10 +963,6 @@ class RikanWanSpatioTemporalTiledVAEDecode(io.ComfyNode):
 
         return io.NodeOutput(output)
 
-from comfy_api.latest import io
-import torch
-import comfy.utils
-
 class RikanQwenCustomImageSize(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -974,9 +975,9 @@ class RikanQwenCustomImageSize(io.ComfyNode):
                 io.Vae.Input("vae"),
                 io.String.Input("text", multiline=True, default=""),
                 
-                # Menambahkan opsi Zoom Out
                 io.Combo.Input("resize_mode", options=["Crop to Fit", "Generative Fill", "Zoom Out"], default="Crop to Fit"),
-                io.Combo.Input("prompt_theme", options=["Technical Precision", "Artistic Continuity"], default="Technical Precision"),
+                # Menambahkan opsi Full Body
+                io.Combo.Input("prompt_theme", options=["Technical Precision", "Artistic Continuity", "Full Body"], default="Technical Precision"),
                 
                 io.Combo.Input("resolution_preset", options=["Custom", "512p (SD 1.5)", "720p (HD)", "1080p (FHD)", "1024p (SDXL)"], default="720p (HD)"),
                 io.Combo.Input("orientation", options=["Horizontal (Landscape)", "Vertical (Portrait)", "Square (1:1)"], default="Horizontal (Landscape)"),
@@ -1005,24 +1006,27 @@ class RikanQwenCustomImageSize(io.ComfyNode):
             elif orientation == "Vertical (Portrait)": w, h = base_short, base_long
             else: w, h = base_short, base_short
 
+        # Paksa orientasi menjadi vertikal jika mode Full Body
+        if prompt_theme == "Full Body" and w > h:
+            w, h = h, w
+
         w, h = (w // 8) * 8, (h // 8) * 8
         pixels_batch = pixels[0:1].repeat(batch_size, 1, 1, 1)
         B, orig_H, orig_W, C = pixels_batch.shape
 
-        if resize_mode == "Crop to Fit":
+        # Bypass Crop to Fit normal jika sedang di mode Full Body agar outpaint bisa berjalan
+        if resize_mode == "Crop to Fit" and prompt_theme != "Full Body":
             pixels_processed = comfy.utils.common_upscale(pixels_batch.movedim(-1, 1), w, h, "bilinear", "center").movedim(1, -1)
             t = vae.encode(pixels_processed[:,:,:,:3])
             return io.NodeOutput({"samples": t}, text)
         
         else:
-            # Mode Generative Fill atau Zoom Out
             base_scale = min(w / orig_W, h / orig_H)
             
-            if resize_mode == "Zoom Out":
-                # Mengecilkan gambar asli menjadi 70% dari ukuran maksimalnya agar menyisakan ruang kosong di sekelilingnya
+            # Matikan efek zoom out jika Full Body
+            if resize_mode == "Zoom Out" and prompt_theme != "Full Body":
                 final_scale = base_scale * 0.70
             else:
-                # Mode Generative Fill biasa: menyentuh tepi kanvas (fit to edge)
                 final_scale = base_scale
             
             new_W, new_H = round(orig_W * final_scale), round(orig_H * final_scale)
@@ -1031,23 +1035,247 @@ class RikanQwenCustomImageSize(io.ComfyNode):
             canvas = torch.zeros((batch_size, h, w, C), device=pixels_batch.device, dtype=pixels_batch.dtype)
             canvas.fill_(0.5) 
             
-            y_off, x_off = (h - new_H) // 2, (w - new_W) // 2
+            # Logika penempatan gambar
+            if prompt_theme == "Full Body":
+                y_off = 0 # Tempel di ujung atas
+                x_off = (w - new_W) // 2
+            else:
+                y_off = (h - new_H) // 2 # Posisi tengah
+                x_off = (w - new_W) // 2
+                
             canvas[:, y_off:y_off+new_H, x_off:x_off+new_W, :] = resized
             t = vae.encode(canvas[:,:,:,:3])
             
-            # --- Pembentukan Prompt Otomatis ---
-            if resize_mode == "Zoom Out":
-                action_desc = "perform a wide-angle zoom out"
+            # Deteksi area kosong secara matematis untuk menyesuaikan arah prompt
+            if h - new_H > w - new_W:
+                pad_direction = "top and bottom"
             else:
-                action_desc = "zoom out to match orientation"
-
-            if prompt_theme == "Technical Precision":
-                addon = f"Seamlessly {action_desc} while maintaining the central original image as an untouched anchor. Generate the top and bottom areas by extending existing textures and lighting, make it natural like it always the result if the original image was zoomed out. Zero distortion of original details."
+                pad_direction = "left and right"
+            
+            # --- Pembentukan Prompt Otomatis ---
+            if prompt_theme == "Full Body":
+                addon = "Seamlessly extend the image to generate the full body. Maintain the face and upper body as an untouched anchor. Generative fill the extended area with matching environment. Zero distortion of original details."
+            
+            elif prompt_theme == "Technical Precision":
+                # Menggunakan kata kerja dasar (Verb 1)
+                action_desc = "perform a wide-angle zoom out" if resize_mode == "Zoom Out" else "extend the frame"
+                addon = f"Seamlessly generate the {pad_direction} areas by {action_desc}. Match existing textures and lighting while maintaining the central original image as an untouched anchor. Make it natural like it was always the original zoomed-out photograph. Zero distortion of original details."
+            
             else: # Artistic Continuity
-                addon = f"Seamlessly {action_desc} while perform a context-aware generative fill on the top and bottom empty spaces. Match the existing color grade, depth of field, and environmental theme perfectly. Ensure the new areas are a natural aesthetic continuation of the original image, make it natural like it always the result if the original image was zoomed out."
+                action_desc = "perform a wide-angle zoom out" if resize_mode == "Zoom Out" else "extend the frame"
+                addon = f"Seamlessly {action_desc} by performing a context-aware generative fill on the {pad_direction} empty spaces. Match the existing color grade, depth of field, and environmental theme perfectly. Ensure the new areas are a natural aesthetic continuation of the original image."
             
             final_prompt = f"{text}\n{addon}" if text.strip() != "" else addon
             return io.NodeOutput({"samples": t}, final_prompt)
+
+class RikanRTXResolutionSettings(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanRTXResolutionSettings",
+            display_name="Rikan RTX Resolution Settings",
+            category="Rikannodes",
+            inputs=[
+                io.Image.Input("pixels"),
+                io.Combo.Input("target_resolution", options=["1080p (FHD)", "2K (QHD)", "4K (UHD)", "8K (FUHD)"], default="4K (UHD)")
+            ],
+            outputs=[
+                io.Int.Output(display_name="width"),
+                io.Int.Output(display_name="height")
+            ]
+        )
+
+    @classmethod
+    def execute(cls, pixels, target_resolution) -> io.NodeOutput:
+        # Mengambil informasi dimensi dari frame pertama (shape: [Batch, Height, Width, Channels])
+        orig_h, orig_w = pixels.shape[1], pixels.shape[2]
+        
+        # Menentukan ukuran sisi terpanjang berdasarkan resolusi yang dipilih
+        if target_resolution == "1080p (FHD)":
+            target_long_edge = 1920
+        elif target_resolution == "2K (QHD)":
+            target_long_edge = 2560
+        elif target_resolution == "4K (UHD)":
+            target_long_edge = 3840
+        else: # "8K (FUHD)"
+            target_long_edge = 7680
+            
+        # Logika Deteksi Orientasi & Perhitungan Aspek Rasio Otomatis
+        if orig_w > orig_h:
+            # Landscape (Horizontal)
+            out_w = target_long_edge
+            out_h = int(target_long_edge * (orig_h / orig_w))
+        elif orig_h > orig_w:
+            # Portrait (Vertical)
+            out_h = target_long_edge
+            out_w = int(target_long_edge * (orig_w / orig_h))
+        else:
+            # Square (Kotak 1:1)
+            out_w = target_long_edge
+            out_h = target_long_edge
+            
+        # Memastikan hasil akhir bisa dibagi 8 (Syarat wajib untuk Latent/VAE di ComfyUI)
+        out_w = (out_w // 8) * 8
+        out_h = (out_h // 8) * 8
+        
+        return io.NodeOutput(out_w, out_h)
+
+# ── CIVITAI AUTO-FETCH API ───────────────────────────────────────────────────
+import aiohttp
+
+LORA_HASH_CACHE = {}
+
+def calculate_sha256_full(filepath):
+    """Menghitung SHA256 asli dari seluruh file (Akurat 100% untuk Civitai)"""
+    sha256_hash = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        # Membaca dalam potongan 4MB agar tidak memakan banyak memori RAM
+        for byte_block in iter(lambda: f.read(4096 * 1024), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+@server.PromptServer.instance.routes.post("/rikan/get_lora_info")
+async def fetch_lora_info(request):
+    post = await request.json()
+    lora_name = post.get("lora_name")
+    
+    if not lora_name or lora_name == "None":
+        return web.json_response({"found": False})
+
+    # Cek Cache
+    if lora_name in LORA_HASH_CACHE:
+        return web.json_response(LORA_HASH_CACHE[lora_name])
+
+    lora_path = folder_paths.get_full_path("loras", lora_name)
+    if not lora_path or not os.path.exists(lora_path):
+        return web.json_response({"found": False})
+
+    # 1. Hitung SHA256
+    loop = asyncio.get_running_loop()
+    file_hash = await loop.run_in_executor(None, calculate_sha256_full, lora_path)
+    print(f"[Rikan API] Fetching Info for {lora_name} (Hash: {file_hash})")
+
+    url = f"https://civitai.com/api/v1/model-versions/by-hash/{file_hash}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    
+    # 2. Ambil data dari Civitai
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    
+                    model_id = data.get("modelId")
+                    version_id = data.get("id")
+                    
+                    if model_id:
+                        model_info = data.get("model", {})
+                        
+                        # --- PERBAIKAN: Mengambil media BESERTA prompt-nya ---
+                        # --- PERBAIKAN: Mengambil media BESERTA prompt & Link Halamannya ---
+                        media_files = []
+                        for img in data.get("images", []):
+                            meta = img.get("meta")
+                            prompt_text = ""
+                            if isinstance(meta, dict):
+                                prompt_text = meta.get("prompt", "")
+                            
+                            # Ekstrak ID media dari URL
+                            # Contoh: https://.../original=true/126889780.mp4 -> 126889780
+                            img_url = img.get("url", "")
+                            img_id = ""
+                            if "id" in img:
+                                img_id = str(img["id"])
+                            elif img_url:
+                                filename = img_url.split("/")[-1]  # Ambil "126889780.mp4"
+                                img_id = filename.split(".")[0]    # Ambil "126889780"
+                                
+                            # Buat link menuju halaman post gambar tersebut
+                            page_url = f"https://civitai.com/images/{img_id}" if img_id else img_url
+
+                            media_files.append({
+                                "url": img_url,
+                                "page_url": page_url,
+                                "type": img.get("type", "image"),
+                                "prompt": prompt_text
+                            })
+
+                        result = {
+                            "found": True,
+                            "filename": lora_name,
+                            "hash": file_hash,
+                            "url": f"https://civitai.com/models/{model_id}?modelVersionId={version_id}",
+                            "model_name": f"{model_info.get('name', 'Unknown')} - {data.get('name', 'Unknown')}",
+                            "base_model": data.get("baseModel", "Unknown"),
+                            "trained_words": data.get("trainedWords", []),
+                            "media": media_files
+                        }
+                        LORA_HASH_CACHE[lora_name] = result
+                        return web.json_response(result)
+    except Exception as e:
+        print(f"[Rikan API] Fetch Error: {e}")
+        
+    return web.json_response({"found": False, "filename": lora_name, "hash": file_hash})
+
+class RikanMultiLoraLoader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="RikanMultiLoraLoader",
+            display_name="Rikan Multi LoRA Loader",
+            category="Rikannodes",
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip", optional=True), # CLIP bersifat opsional
+                io.String.Input("lora_data", default="[]", multiline=True),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+                io.Clip.Output(display_name="clip"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, lora_data, clip=None) -> io.NodeOutput:
+        import comfy.sd
+        import comfy.utils
+        
+        try:
+            loras_to_apply = json.loads(lora_data)
+        except Exception as e:
+            log.error(f"[Rikan MultiLoraLoader] Failed to process JSON data: {e}")
+            return io.NodeOutput(model, clip)
+
+        # Clone model agar tidak mencemari model asli di node sebelumnya
+        patched_model = model.clone() if hasattr(model, 'clone') else model
+        patched_clip = clip.clone() if clip and hasattr(clip, 'clone') else clip
+
+        for lora in loras_to_apply:
+            if not lora.get("enable", False) or lora.get("name") == "None":
+                continue
+
+            lora_name = lora.get("name")
+            strength = float(lora.get("modelStr", 1.0))
+            
+            if strength == 0:
+                continue
+
+            lora_path = folder_paths.get_full_path("loras", lora_name)
+            if lora_path is None:
+                log.warning(f"[Rikan MultiLoraLoader] LoRA file not found: {lora_name}")
+                continue
+
+            try:
+                lora_obj = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                patched_model, patched_clip = comfy.sd.load_lora_for_models(patched_model, patched_clip, lora_obj, strength, strength)
+                log.info(f"[Rikan MultiLoraLoader] Successfully loaded LoRA: {lora_name} (Strength: {strength})")
+            except Exception as e:
+                log.error(f"[Rikan MultiLoraLoader] Error loading LoRA {lora_name}: {e}")
+
+        return io.NodeOutput(patched_model, patched_clip)
 
 
 # ==============================================================================
@@ -1065,7 +1293,9 @@ class RikannodesExtension(ComfyExtension):
             RikanHiddenBase64ImageLoader,
             RikanHiddenBase64ImageSaver,
             RikanWanSpatioTemporalTiledVAEDecode,
-            RikanQwenCustomImageSize
+            RikanQwenCustomImageSize,
+            RikanRTXResolutionSettings,
+            RikanMultiLoraLoader
         ]
 
 async def comfy_entrypoint() -> RikannodesExtension:
@@ -1079,7 +1309,9 @@ NODE_CLASS_MAPPINGS = {
     "RikanHiddenBase64ImageLoader": RikanHiddenBase64ImageLoader,
     "RikanHiddenBase64ImageSaver": RikanHiddenBase64ImageSaver, 
     "RikanWanSpatioTemporalTiledVAEDecode": RikanWanSpatioTemporalTiledVAEDecode,
-    "RikanQwenCustomImageSize": RikanQwenCustomImageSize
+    "RikanQwenCustomImageSize": RikanQwenCustomImageSize,
+    "RikanRTXResolutionSettings": RikanRTXResolutionSettings,
+    "RikanMultiLoraLoader": RikanMultiLoraLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1090,5 +1322,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RikanHiddenBase64ImageLoader": "Rikan Hidden Base64 Image Loader",
     "RikanHiddenBase64ImageSaver": "Rikan Hidden Base64 Image Saver",
     "RikanWanSpatioTemporalTiledVAEDecode": "Rikan Wan Spatio-Temporal Tiled VAE Decode",
-    "RikanQwenCustomImageSize": "Rikan Qwen Custom Image Size"
+    "RikanQwenCustomImageSize": "Rikan Qwen Custom Image Size",
+    "RikanRTXResolutionSettings": "Rikan RTX Resolution Settings",
+    "RikanMultiLoraLoader": "Rikan Multi Lora Loader"
 }
