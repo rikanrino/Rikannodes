@@ -1,22 +1,22 @@
 import { app } from "../../scripts/app.js";
 
 app.registerExtension({
-    name: "prompt_relay.MultiLoraGateNative",
+    name: "rikan.MultiLoraLoaderNative", // Ubah nama internal ekstensi
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "RikanPromptRelayMultiLoraGate") {
+        // PERBAIKAN: Menargetkan nama node yang baru
+        if (nodeData.name === "RikanMultiLoraLoader") { 
             
             const syncData = (node) => {
                 const dataWidget = node.widgets.find(w => w.name === "lora_data");
                 if (!dataWidget) return;
 
                 const loras = [];
-                const loraWidgets = node.widgets.filter(w => w.type === "RIKAN_LORA_ROW");
+                const loraWidgets = node.widgets.filter(w => w.type === "RIKAN_LORA_LOADER_ROW");
                 
                 loraWidgets.forEach(w => {
                     loras.push({
                         enable: w.value.enable,
                         name: w.value.name,
-                        segment: w.value.segment,
                         modelStr: w.value.modelStr
                     });
                 });
@@ -61,21 +61,15 @@ app.registerExtension({
                 
                 if (data.media && data.media.length > 0) {
                     data.media.forEach(m => {
-                        let mediaEl = "";
-                        if (m.type === "video") {
-                            mediaEl = `<video src="${m.url}" autoplay loop muted controls style="width: 100%; height: 350px; object-fit: cover; background: #000; display: block;"></video>`;
-                        } else {
-                            mediaEl = `<img src="${m.url}" style="width: 100%; height: 350px; object-fit: cover; background: #000; display: block;">`;
-                        }
+                        let mediaEl = m.type === "video" ? 
+                            `<video src="${m.url}" autoplay loop muted controls style="width: 100%; height: 350px; object-fit: cover; background: #000; display: block;"></video>` : 
+                            `<img src="${m.url}" style="width: 100%; height: 350px; object-fit: cover; background: #000; display: block;">`;
 
-                        let promptHtml = "";
-                        if (m.prompt) {
-                            promptHtml = `
-                                <div style="margin-top: 8px; border: 1px solid #555; border-radius: 4px; padding: 6px; background: #111; max-height: 80px; overflow-y: auto; font-size: 11px; line-height: 1.4; color: #e5e7eb; cursor: text;">
-                                    <span style="color: #9ca3af; margin-right: 5px; user-select: none;">positive</span>${m.prompt}
-                                </div>
-                            `;
-                        }
+                        let promptHtml = m.prompt ? `
+                            <div style="margin-top: 8px; border: 1px solid #555; border-radius: 4px; padding: 6px; background: #111; max-height: 80px; overflow-y: auto; font-size: 11px; line-height: 1.4; color: #e5e7eb; cursor: text;">
+                                <span style="color: #9ca3af; margin-right: 5px; user-select: none;">positive</span>${m.prompt}
+                            </div>
+                        ` : "";
 
                         const overlayHtml = `
                             <div class="media-overlay" style="position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(35,35,35,0.95); padding: 12px; box-sizing: border-box; opacity: 0; transition: opacity 0.2s ease-in-out; border-top: 1px solid #555; pointer-events: auto;">
@@ -92,7 +86,6 @@ app.registerExtension({
                                 ${overlayHtml}
                             </div>
                         `;
-                        
                         mediaSection.innerHTML += containerHtml;
                     });
                 } else {
@@ -120,7 +113,7 @@ app.registerExtension({
 
             const addLoraRow = function(node, loraData) {
                 const w = node.addWidget("custom", "lora_row_" + Math.random().toString(36).substr(2, 5), loraData, () => syncData(node));
-                w.type = "RIKAN_LORA_ROW";
+                w.type = "RIKAN_LORA_LOADER_ROW"; 
                 w.civitaiData = null;
 
                 w.fetchCivitaiData = function(name) {
@@ -153,7 +146,6 @@ app.registerExtension({
                 };
 
                 w.draw = function(ctx, node, width, y, margin) {
-                    // PERBAIKAN: Menyimpan koordinat Y agar klik mouse tidak meleset
                     this.last_y = y; 
                     
                     ctx.save();
@@ -180,7 +172,7 @@ app.registerExtension({
                     ctx.fill();
 
                     // Info Button
-                    const infoX = width - margin - 110;
+                    const infoX = width - margin - 75;
                     if (this.civitaiData && this.civitaiData.loading) {
                         ctx.fillStyle = "#b45309";
                         ctx.beginPath(); ctx.roundRect(infoX, y + 6, 16, 16, 3); ctx.fill();
@@ -194,13 +186,6 @@ app.registerExtension({
                         ctx.beginPath(); ctx.roundRect(infoX, y + 6, 16, 16, 3); ctx.fill();
                         ctx.fillStyle = "#888"; ctx.font = "bold 12px Arial"; ctx.fillText("x", infoX + 4, y + 18);
                     }
-
-                    // Segment
-                    const segX = width - margin - 85;
-                    ctx.fillStyle = isEnabled ? "#111" : "#1a1a1a";
-                    ctx.beginPath(); ctx.roundRect(segX, y + 5, 35, 18, 3); ctx.fill();
-                    ctx.fillStyle = fgColor; ctx.textAlign = "center"; ctx.font = "11px Arial";
-                    ctx.fillText("S: " + v.segment, segX + 17, y + 18);
 
                     // Strength
                     const strX = width - margin - 45;
@@ -228,13 +213,11 @@ app.registerExtension({
                 };
 
                 w.mouse = function(event, pos, node) {
-                    // PERBAIKAN: Deteksi pointerdown untuk kompatibilitas ComfyUI modern
                     if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
                     
                     const [x, y] = pos;
-                    const wY = this.last_y || 0; // Mengambil koordinat Y dari w.draw
+                    const wY = this.last_y || 0; 
                     
-                    // Cek apakah klik persis berada di baris Y ini
                     if (y < wY || y > wY + 28) return false;
 
                     const width = node.size[0];
@@ -250,27 +233,13 @@ app.registerExtension({
                     }
 
                     // Info Button
-                    const infoX = width - margin - 110;
+                    const infoX = width - margin - 75;
                     if (x >= infoX && x <= infoX + 16) {
                         if (this.civitaiData && this.civitaiData.found) {
                             showInfoPopup(this.civitaiData);
                         } else if (this.civitaiData && !this.civitaiData.found) {
                             alert("This LoRA is not found on Civitai's Database.");
                         }
-                        return true;
-                    }
-
-                    // Segment
-                    const segX = width - margin - 85;
-                    if (x >= segX && x <= segX + 35) {
-                        app.canvas.prompt("Set Segment (0-99):", v.segment, (val) => {
-                            const parsed = parseInt(val);
-                            if (!isNaN(parsed)) {
-                                v.segment = parsed;
-                                syncData(node);
-                                node.setDirtyCanvas(true, true);
-                            }
-                        }, event);
                         return true;
                     }
 
@@ -337,7 +306,7 @@ app.registerExtension({
 
                 this.btnToggleAll = this.addWidget("button", "🔄 Toggle All Enable/Disable", "toggle_all", () => {
                     let allOn = true;
-                    const loraWidgets = this.widgets.filter(w => w.type === "RIKAN_LORA_ROW");
+                    const loraWidgets = this.widgets.filter(w => w.type === "RIKAN_LORA_LOADER_ROW");
                     for (const w of loraWidgets) {
                         if (w.value.enable === false) { allOn = false; break; }
                     }
@@ -359,7 +328,7 @@ app.registerExtension({
                     const menuItems = loras.map(loraName => ({
                         content: loraName,
                         callback: () => {
-                            addLoraRow(this, { enable: true, name: loraName, segment: 0, modelStr: 0.80 });
+                            addLoraRow(this, { enable: true, name: loraName, modelStr: 1.00 });
                             this.computeSize();
                             this.setDirtyCanvas(true, true);
                         }
@@ -373,7 +342,7 @@ app.registerExtension({
                 
                 this.btnRemoveLora = this.addWidget("button", "➖ Remove Last LoRA", "remove_lora", () => {
                     for (let i = this.widgets.length - 1; i >= 0; i--) {
-                        if (this.widgets[i].type === "RIKAN_LORA_ROW") {
+                        if (this.widgets[i].type === "RIKAN_LORA_LOADER_ROW") {
                             this.widgets.splice(i, 1);
                             syncData(this);
                             this.computeSize();
@@ -399,7 +368,7 @@ app.registerExtension({
 
                     try {
                         for (let i = this.widgets.length - 1; i >= 0; i--) {
-                            if (this.widgets[i].type === "RIKAN_LORA_ROW" || this.widgets[i].name.startsWith("enable_")) {
+                            if (this.widgets[i].type === "RIKAN_LORA_LOADER_ROW" || this.widgets[i].name.startsWith("enable_")) {
                                 this.widgets.splice(i, 1);
                             }
                         }
@@ -407,7 +376,7 @@ app.registerExtension({
                         const savedLoras = JSON.parse(jsonData);
                         for (let i = 0; i < savedLoras.length; i++) {
                             const lora = savedLoras[i];
-                            addLoraRow(this, { enable: lora.enable, name: lora.name, segment: lora.segment, modelStr: lora.modelStr });
+                            addLoraRow(this, { enable: lora.enable, name: lora.name, modelStr: lora.modelStr });
                         }
                         
                         const wData = this.widgets.find(w => w.name === "lora_data");
@@ -418,7 +387,7 @@ app.registerExtension({
                             wData.value = jsonData;
                         }
                     } catch (e) {
-                        console.error("[Rikan MultiLoraGate] Failed to parse saved JSON data:", e);
+                        console.error("[Rikan MultiLoraLoader] Failed to parse saved JSON data:", e);
                     }
                 }
 
